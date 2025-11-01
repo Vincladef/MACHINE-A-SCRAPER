@@ -61,6 +61,16 @@ BLOCKED_DOMAINS = {
 }
 EXTRA_QUERY = os.getenv("EXTRA_QUERY", "").strip()
 EXCLUDE_TERMS = [term for term in os.getenv("EXCLUDE_TERMS", "").split() if term]
+PERPLEXITY_API_URL = os.getenv("PERPLEXITY_API_URL", "https://api.perplexity.ai/chat/completions")
+PERPLEXITY_MODEL = os.getenv("PERPLEXITY_MODEL", "llama-3.1-sonar-large-128k-chat")
+PERPLEXITY_TIMEOUT = int(os.getenv("PERPLEXITY_TIMEOUT", "30"))
+PERPLEXITY_MAX_SITES = int(os.getenv("PERPLEXITY_MAX_SITES", "5"))
+
+SOURCE_LABELS = {
+    "perplexity": "Perplexity",
+    "cse": "Google CSE",
+    "input": "URL fournie",
+}
 
 
 def is_probable_email(addr: str) -> bool:
@@ -86,6 +96,21 @@ def build_query(base: str) -> str:
     if EXCLUDE_TERMS:
         query += " " + " ".join(f"-{term}" for term in EXCLUDE_TERMS)
     return query
+
+
+def dedupe_preserve_order(items: List[str]) -> List[str]:
+    seen: Set[str] = set()
+    ordered: List[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            ordered.append(item)
+    return ordered
+
+
+def is_url(value: str) -> bool:
+    lowered = value.lower()
+    return lowered.startswith("http://") or lowered.startswith("https://")
 
 
 class ScraperError(RuntimeError):
@@ -241,6 +266,136 @@ def extract_emails_from_html(html: str) -> Set[str]:
     return emails
 
 
+def fetch_sites_from_perplexity(query: str, max_sites: int) -> Tuple[List[str], str]:
+    api_key = os.getenv("PERPLEXITY_API_KEY")
+    if not api_key:
+        return [], "PERPLEXITY_API_KEY manquante"
+
+    payload = {
+        "model": PERPLEXITY_MODEL,
+        "temperature": 0,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Tu aides à identifier des sites web pertinents. "
+                    "Réponds STRICTEMENT en JSON selon ce schéma: "
+                    "{\"sites\":[{\"url\":\"https://...\",\"notes\":\"...\"}, ...]}."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Fournis jusqu'à {max_sites} sites web actifs et pertinents en France pour: '{query}'. "
+                    "Priorise les domaines francophones/ou français. Pas de doublons."
+                ),
+            },
+        ],
+        "max_output_tokens": 500,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        response = requests.post(
+            PERPLEXITY_API_URL,
+            json=payload,
+            headers=headers,
+            timeout=PERPLEXITY_TIMEOUT,
+        )
+        response.raise_for_status()
+    except RequestException as exc:
+        return [], f"Erreur Perplexity: {exc}"
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        return [], f"Réponse Perplexity invalide: {exc}"
+
+    choices = data.get("choices", []) or []
+    if not choices:
+        return [], "Réponse Perplexity vide"
+
+    content = choices[0].get("message", {}).get("content", "")
+    urls: List[str] = []
+
+    if content:
+        try:
+            parsed = json.loads(content)
+            entries = []
+            if isinstance(parsed, dict):
+                entries = parsed.get("sites", []) or parsed.get("urls", [])
+            elif isinstance(parsed, list):
+                entries = parsed
+
+            for entry in entries:
+                if isinstance(entry, dict):
+                    url = entry.get("url") or entry.get("href") or entry.get("lien")
+                else:
+                    url = entry
+                if not url:
+                    continue
+                url = str(url).strip()
+                if not url.lower().startswith("http"):
+                    continue
+                urls.append(url)
+        except json.JSONDecodeError:
+            urls = [
+                match.strip().rstrip(".,);]")
+                for match in re.findall(r"https?://[^\s\]\)\"'>]+", content)
+            ]
+
+    unique_urls = dedupe_preserve_order(urls)[:max_sites]
+    if not unique_urls:
+        return [], "Aucun site exploitable via Perplexity"
+
+    return unique_urls, ""
+
+
+def generate_candidate_links(
+    query: str,
+    api_key: str,
+    cx_id: str,
+    max_results: int,
+) -> Tuple[List[Tuple[str, str]], str]:
+    cleaned = query.strip()
+    if not cleaned:
+        return [], "Cible vide"
+
+    links: List[Tuple[str, str]] = []
+    errors: List[str] = []
+
+    if is_url(cleaned):
+        return [(cleaned, "input")], ""
+
+    llm_urls, llm_error = fetch_sites_from_perplexity(cleaned, PERPLEXITY_MAX_SITES)
+    if llm_urls:
+        for url in llm_urls:
+            links.append((url, "perplexity"))
+    elif llm_error:
+        errors.append(llm_error)
+
+    if not links:
+        cse_urls, cse_error = fetch_results_paginated(cleaned, api_key, cx_id, max_results)
+        if cse_urls:
+            for url in cse_urls:
+                links.append((url, "cse"))
+        elif cse_error:
+            errors.append(cse_error)
+
+    deduped: List[Tuple[str, str]] = []
+    seen_links: Set[str] = set()
+    for url, origin in links:
+        if url not in seen_links:
+            seen_links.add(url)
+            deduped.append((url, origin))
+
+    return deduped, "; ".join(errors)
+
+
 def fetch_page(url: str) -> Tuple[Response | None, str]:
     """Télécharge la page web cible et retourne la réponse."""
 
@@ -270,26 +425,31 @@ def main() -> int:
         results: List[List[str]] = [["Cible", "Site Internet", "Mails"]]
 
         for query in targets:
-            links, search_error = fetch_results_paginated(query, api_key, cx_id, MAX_RESULTS)
-            if search_error and not links:
-                results.append([query, "", f"Recherche: {search_error}"])
+            candidates, source_error = generate_candidate_links(query, api_key, cx_id, MAX_RESULTS)
+            if not candidates:
+                message = source_error or "Aucun lien généré"
+                results.append([query, "", f"Sources: {message}"])
                 time.sleep(REQUEST_DELAY)
                 continue
 
-            for link in links:
+            if source_error:
+                print(f"Info - {query}: {source_error}")
+
+            for link, origin in candidates:
+                source_prefix = f"{SOURCE_LABELS.get(origin, origin)} | "
                 # Ignorer certains domaines connus pour bloquer le scraping
                 host = (urlparse(link).hostname or "").lower()
                 tld = host.split(".")[-1] if host else ""
                 if ALLOW_TLDS and tld and tld not in ALLOW_TLDS:
-                    results.append([query, link, "Ignoré: TLD non ciblé"])
+                    results.append([query, link, f"{source_prefix}Ignoré: TLD non ciblé"])
                     time.sleep(REQUEST_DELAY)
                     continue
                 if SKIP_SUBS and any(host.startswith(prefix) for prefix in SKIP_SUBS):
-                    results.append([query, link, "Ignoré: sous-domaine non prioritaire"])
+                    results.append([query, link, f"{source_prefix}Ignoré: sous-domaine non prioritaire"])
                     time.sleep(REQUEST_DELAY)
                     continue
                 if any(host.endswith(d) for d in BLOCKED_DOMAINS):
-                    results.append([query, link, "Ignoré: domaine qui bloque le scraping"])
+                    results.append([query, link, f"{source_prefix}Ignoré: domaine qui bloque le scraping"])
                     time.sleep(REQUEST_DELAY)
                     continue
 
@@ -329,10 +489,10 @@ def main() -> int:
                             pass
 
                 if http_error and not emails:
-                    results.append([query, link, f"Scraping: {http_error}"])
+                    results.append([query, link, f"{source_prefix}Scraping: {http_error}"])
                 else:
                     emails_str = "; ".join(sorted(emails)) if emails else "Aucun email détecté"
-                    results.append([query, link, emails_str])
+                    results.append([query, link, f"{source_prefix}{emails_str}"])
 
                 time.sleep(REQUEST_DELAY)
 
