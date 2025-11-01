@@ -64,7 +64,7 @@ EXCLUDE_TERMS = [term for term in os.getenv("EXCLUDE_TERMS", "").split() if term
 PERPLEXITY_API_URL = os.getenv("PERPLEXITY_API_URL", "https://api.perplexity.ai/chat/completions")
 PERPLEXITY_MODEL = os.getenv("PERPLEXITY_MODEL", "llama-3.1-sonar-large-128k-chat")
 PERPLEXITY_TIMEOUT = int(os.getenv("PERPLEXITY_TIMEOUT", "30"))
-PERPLEXITY_MAX_SITES = int(os.getenv("PERPLEXITY_MAX_SITES", "5"))
+PERPLEXITY_MAX_SITES = int(os.getenv("PERPLEXITY_MAX_SITES", "40"))
 
 SOURCE_LABELS = {
     "perplexity": "Perplexity",
