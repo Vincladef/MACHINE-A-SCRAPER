@@ -1,0 +1,38 @@
+name: Scraper
+
+on:
+  workflow_dispatch:
+  # Décommente pour planifier (ex.: tous les jours à 06:00 UTC)
+  # schedule:
+  #   - cron: "0 6 * * *"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      CSE_API_KEY: ${{ secrets.CSE_API_KEY }}
+      CSE_CX_ID: ${{ secrets.CSE_CX_ID }}
+      GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+      GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+      DEEP_SCRAPE: "true"
+      MAX_RESULTS: "100"
+      REQUEST_DELAY: "1.0"
+      HTTP_TIMEOUT: "10"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run scraper
+        run: |
+          python scraper.py
+
