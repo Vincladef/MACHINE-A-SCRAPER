@@ -37,6 +37,8 @@ CSE_GL = os.getenv("CSE_GL", "fr")
 CSE_CR = os.getenv("CSE_CR", "countryFR")
 ALLOW_TLDS = {t for t in os.getenv("ALLOW_TLDS", "fr").lower().split(",") if t}
 SKIP_SUBS = {s.strip().lower() for s in os.getenv("SKIP_SUBS", "blog.,docs.,help.,support.").split(",") if s}
+MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "3"))
+TARGET_EMAIL_COUNT = int(os.getenv("TARGET_EMAIL_COUNT", "100"))
 EXTRA_PATHS = [
     "/contact",
     "/contact-us",
@@ -422,84 +424,108 @@ def main() -> int:
         targets = read_targets(ws_in)
         print(f"Cibles lues: {len(targets)}")
 
-        results: List[List[str]] = [["Cible", "Site Internet", "Mails"]]
+        header = ["Cible", "Site Internet", "Mails"]
+        collected_rows: List[List[str]] = []
+        collected_emails: Set[str] = set()
+        processed_links: Set[str] = set()
 
-        for query in targets:
-            candidates, source_error = generate_candidate_links(query, api_key, cx_id, MAX_RESULTS)
-            if not candidates:
-                message = source_error or "Aucun lien généré"
-                results.append([query, "", f"Sources: {message}"])
-                time.sleep(REQUEST_DELAY)
-                continue
+        def record_email(query_label: str, link_url: str, source_prefix: str, email_value: str) -> None:
+            normalized = email_value.lower()
+            if not is_probable_email(email_value):
+                return
+            if normalized in collected_emails:
+                return
+            collected_emails.add(normalized)
+            collected_rows.append([query_label, link_url, f"{source_prefix}{email_value}"])
 
-            if source_error:
-                print(f"Info - {query}: {source_error}")
+        for iteration in range(1, MAX_ITERATIONS + 1):
+            if len(collected_emails) >= TARGET_EMAIL_COUNT:
+                break
+            print(f"Iteration {iteration}/{MAX_ITERATIONS} - emails collectés: {len(collected_emails)}")
 
-            for link, origin in candidates:
-                source_prefix = f"{SOURCE_LABELS.get(origin, origin)} | "
-                # Ignorer certains domaines connus pour bloquer le scraping
-                host = (urlparse(link).hostname or "").lower()
-                tld = host.split(".")[-1] if host else ""
-                if ALLOW_TLDS and tld and tld not in ALLOW_TLDS:
-                    results.append([query, link, f"{source_prefix}Ignoré: TLD non ciblé"])
-                    time.sleep(REQUEST_DELAY)
+            for query in targets:
+                if len(collected_emails) >= TARGET_EMAIL_COUNT:
+                    break
+
+                candidates, source_error = generate_candidate_links(query, api_key, cx_id, MAX_RESULTS)
+                if source_error:
+                    print(f"Info - {query}: {source_error}")
+
+                if not candidates:
                     continue
-                if SKIP_SUBS and any(host.startswith(prefix) for prefix in SKIP_SUBS):
-                    results.append([query, link, f"{source_prefix}Ignoré: sous-domaine non prioritaire"])
-                    time.sleep(REQUEST_DELAY)
-                    continue
-                if any(host.endswith(d) for d in BLOCKED_DOMAINS):
-                    results.append([query, link, f"{source_prefix}Ignoré: domaine qui bloque le scraping"])
-                    time.sleep(REQUEST_DELAY)
-                    continue
 
-                response, http_error = fetch_page(link)
-                emails: Set[str] = set()
+                for link, origin in candidates:
+                    if len(collected_emails) >= TARGET_EMAIL_COUNT:
+                        break
 
-                if response is not None:
-                    emails |= extract_emails_from_html(response.text)
+                    if link in processed_links:
+                        continue
+                    processed_links.add(link)
 
-                    if DEEP_SCRAPE:
-                        base_url = response.url or link
-                        for path in EXTRA_PATHS:
-                            extra_url = urljoin(base_url, path)
-                            extra_response, _ = fetch_page(extra_url)
-                            if extra_response is not None:
-                                emails |= extract_emails_from_html(extra_response.text)
-                                time.sleep(REQUEST_DELAY)
+                    source_prefix = f"{SOURCE_LABELS.get(origin, origin)} | "
+                    host = (urlparse(link).hostname or "").lower()
+                    tld = host.split(".")[-1] if host else ""
+                    if ALLOW_TLDS and tld and tld not in ALLOW_TLDS:
+                        continue
+                    if SKIP_SUBS and any(host.startswith(prefix) for prefix in SKIP_SUBS):
+                        continue
+                    if any(host.endswith(d) for d in BLOCKED_DOMAINS):
+                        continue
 
-                        # Découverte dynamique des liens contact/about dans la page
-                        try:
-                            soup = BeautifulSoup(response.text, "html.parser")
-                            keywords = ("contact", "about", "à propos", "a propos", "support", "legal", "mentions", "impressum")
-                            discovered = set()
-                            for a in soup.find_all("a"):
-                                text = (a.get_text() or "").lower().strip()
-                                href = a.get("href") or ""
-                                if href and any(k in text for k in keywords):
-                                    discovered.add(urljoin(base_url, href))
+                    response, http_error = fetch_page(link)
+                    emails: Set[str] = set()
 
-                            for extra_url in list(discovered)[:5]:
-                                r2, _ = fetch_page(extra_url)
-                                if r2 is not None:
-                                    emails |= extract_emails_from_html(r2.text)
+                    if response is not None:
+                        emails |= extract_emails_from_html(response.text)
+
+                        if DEEP_SCRAPE:
+                            base_url = response.url or link
+                            for path in EXTRA_PATHS:
+                                extra_url = urljoin(base_url, path)
+                                extra_response, _ = fetch_page(extra_url)
+                                if extra_response is not None:
+                                    emails |= extract_emails_from_html(extra_response.text)
                                     time.sleep(REQUEST_DELAY)
-                        except Exception:
-                            # En cas d'erreur d'analyse HTML, on ignore silencieusement
-                            pass
 
-                if http_error and not emails:
-                    results.append([query, link, f"{source_prefix}Scraping: {http_error}"])
-                else:
-                    emails_str = "; ".join(sorted(emails)) if emails else "Aucun email détecté"
-                    results.append([query, link, f"{source_prefix}{emails_str}"])
+                            try:
+                                soup = BeautifulSoup(response.text, "html.parser")
+                                keywords = ("contact", "about", "à propos", "a propos", "support", "legal", "mentions", "impressum")
+                                discovered = set()
+                                for a in soup.find_all("a"):
+                                    text = (a.get_text() or "").lower().strip()
+                                    href = a.get("href") or ""
+                                    if href and any(k in text for k in keywords):
+                                        discovered.add(urljoin(base_url, href))
 
-                time.sleep(REQUEST_DELAY)
+                                for extra_url in list(discovered)[:10]:
+                                    r2, _ = fetch_page(extra_url)
+                                    if r2 is not None:
+                                        emails |= extract_emails_from_html(r2.text)
+                                        time.sleep(REQUEST_DELAY)
+                            except Exception:
+                                pass
+
+                    if http_error and not emails:
+                        continue
+
+                    if emails:
+                        for email in sorted(emails):
+                            record_email(query, link, source_prefix, email)
+                            if len(collected_emails) >= TARGET_EMAIL_COUNT:
+                                break
+
+                    time.sleep(REQUEST_DELAY)
+
+        results: List[List[str]] = [header]
+        results.extend(collected_rows)
+
+        if not collected_rows:
+            print("Aucun email valide collecté.")
 
         if APPEND_MODE:
             existing = ws_out.get_all_values()
             if existing:
-                values_to_write = results[1:]  # on évite de réécrire l'en-tête
+                values_to_write = results[1:] if collected_rows else []
                 if values_to_write:
                     start_row = len(existing) + 1
                     ws_out.update(range_name=f"A{start_row}", values=values_to_write)
