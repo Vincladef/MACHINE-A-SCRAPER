@@ -31,6 +31,12 @@ MAX_RESULTS = int(os.getenv("MAX_RESULTS", "100"))
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "10"))
 REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "1.0"))
 DEEP_SCRAPE = os.getenv("DEEP_SCRAPE", "false").lower() in ("1", "true", "yes")
+APPEND_MODE = os.getenv("APPEND_MODE", "false").lower() in ("1", "true", "yes")
+CSE_LR = os.getenv("CSE_LR", "lang_fr")
+CSE_GL = os.getenv("CSE_GL", "fr")
+CSE_CR = os.getenv("CSE_CR", "countryFR")
+ALLOW_TLDS = {t for t in os.getenv("ALLOW_TLDS", "fr").lower().split(",") if t}
+SKIP_SUBS = {s.strip().lower() for s in os.getenv("SKIP_SUBS", "blog.,docs.,help.,support.").split(",") if s}
 EXTRA_PATHS = [
     "/contact",
     "/contact-us",
@@ -53,6 +59,8 @@ BLOCKED_DOMAINS = {
     "x.com",
     "youtube.com",
 }
+EXTRA_QUERY = os.getenv("EXTRA_QUERY", "").strip()
+EXCLUDE_TERMS = [term for term in os.getenv("EXCLUDE_TERMS", "").split() if term]
 
 
 def is_probable_email(addr: str) -> bool:
@@ -68,6 +76,16 @@ def is_probable_email(addr: str) -> bool:
     if tld in BAD_TLDS:
         return False
     return True
+
+
+def build_query(base: str) -> str:
+    components = [base]
+    if EXTRA_QUERY:
+        components.append(EXTRA_QUERY)
+    query = " ".join(components).strip()
+    if EXCLUDE_TERMS:
+        query += " " + " ".join(f"-{term}" for term in EXCLUDE_TERMS)
+    return query
 
 
 class ScraperError(RuntimeError):
@@ -148,10 +166,16 @@ def fetch_results_paginated(
         params = {
             "key": api_key,
             "cx": cx_id,
-            "q": query,
+            "q": build_query(query),
             "num": batch_size,
             "start": start,
         }
+        if CSE_LR:
+            params["lr"] = CSE_LR
+        if CSE_GL:
+            params["gl"] = CSE_GL
+        if CSE_CR:
+            params["cr"] = CSE_CR
 
         try:
             response = requests.get(CSE_API_URL, params=params, timeout=HTTP_TIMEOUT)
@@ -255,6 +279,15 @@ def main() -> int:
             for link in links:
                 # Ignorer certains domaines connus pour bloquer le scraping
                 host = (urlparse(link).hostname or "").lower()
+                tld = host.split(".")[-1] if host else ""
+                if ALLOW_TLDS and tld and tld not in ALLOW_TLDS:
+                    results.append([query, link, "Ignoré: TLD non ciblé"])
+                    time.sleep(REQUEST_DELAY)
+                    continue
+                if SKIP_SUBS and any(host.startswith(prefix) for prefix in SKIP_SUBS):
+                    results.append([query, link, "Ignoré: sous-domaine non prioritaire"])
+                    time.sleep(REQUEST_DELAY)
+                    continue
                 if any(host.endswith(d) for d in BLOCKED_DOMAINS):
                     results.append([query, link, "Ignoré: domaine qui bloque le scraping"])
                     time.sleep(REQUEST_DELAY)
@@ -303,9 +336,23 @@ def main() -> int:
 
                 time.sleep(REQUEST_DELAY)
 
-        ws_out.clear()
-        ws_out.update(range_name="A1", values=results)
-        print(f"Écriture OK: {len(results) - 1} lignes.")
+        if APPEND_MODE:
+            existing = ws_out.get_all_values()
+            if existing:
+                values_to_write = results[1:]  # on évite de réécrire l'en-tête
+                if values_to_write:
+                    start_row = len(existing) + 1
+                    ws_out.update(range_name=f"A{start_row}", values=values_to_write)
+                    print(f"Écriture OK (append): +{len(values_to_write)} lignes.")
+                else:
+                    print("Aucune nouvelle ligne à ajouter.")
+            else:
+                ws_out.update(range_name="A1", values=results)
+                print(f"Écriture OK (append init): {len(results) - 1} lignes.")
+        else:
+            ws_out.clear()
+            ws_out.update(range_name="A1", values=results)
+            print(f"Écriture OK (replace): {len(results) - 1} lignes.")
 
         return 0
 
