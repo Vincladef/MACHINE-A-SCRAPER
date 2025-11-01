@@ -16,6 +16,7 @@ import sys
 import time
 from pathlib import Path
 from typing import List, Set, Tuple
+from urllib.parse import urljoin
 
 import gspread
 import requests
@@ -26,6 +27,18 @@ from requests.exceptions import RequestException
 CSE_API_URL = "https://www.googleapis.com/customsearch/v1"
 EMAIL_REGEX = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 CREDS_FILENAME = "sheets_creds.json"
+MAX_RESULTS = int(os.getenv("MAX_RESULTS", "100"))
+HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "10"))
+REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "1.0"))
+DEEP_SCRAPE = os.getenv("DEEP_SCRAPE", "false").lower() in ("1", "true", "yes")
+EXTRA_PATHS = [
+    "/contact",
+    "/contact-us",
+    "/contacts",
+    "/about",
+    "/a-propos",
+    "/mentions-legales",
+]
 
 
 class ScraperError(RuntimeError):
@@ -78,36 +91,65 @@ def read_targets(ws_in: gspread.Worksheet) -> List[str]:
     return targets
 
 
-def fetch_first_result(query: str, api_key: str, cx_id: str) -> Tuple[str, str]:
-    """Appelle l'API Google Custom Search et retourne l'URL du premier résultat."""
-
-    params = {
-        "key": api_key,
-        "cx": cx_id,
-        "q": query,
-        "num": 1,
-    }
+def fetch_results_paginated(
+    query: str,
+    api_key: str,
+    cx_id: str,
+    max_results: int = MAX_RESULTS,
+) -> Tuple[List[str], str]:
+    """Retourne jusqu'à `max_results` URLs via l'API Google Custom Search (pagination)."""
 
     try:
-        response = requests.get(CSE_API_URL, params=params, timeout=10)
-        response.raise_for_status()
-    except RequestException as exc:
-        return "", f"Erreur CSE: {exc}"
+        target = max(1, min(int(max_results), 100))
+    except Exception:
+        target = 10
 
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        return "", f"Réponse CSE invalide: {exc}"
+    links: List[str] = []
+    start = 1
 
-    items = payload.get("items", [])
-    if not items:
-        return "", "Aucun résultat CSE"
+    while len(links) < target and start <= 100:
+        remaining = target - len(links)
+        batch_size = min(10, remaining)
+        params = {
+            "key": api_key,
+            "cx": cx_id,
+            "q": query,
+            "num": batch_size,
+            "start": start,
+        }
 
-    link = items[0].get("link")
-    if not link:
-        return "", "Lien vide dans le premier résultat"
+        try:
+            response = requests.get(CSE_API_URL, params=params, timeout=HTTP_TIMEOUT)
+            response.raise_for_status()
+        except RequestException as exc:
+            return links, f"Erreur CSE: {exc}"
 
-    return link, ""
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            return links, f"Réponse CSE invalide: {exc}"
+
+        items = payload.get("items", []) or []
+        if not items:
+            break
+
+        batch_links = [item.get("link") for item in items if item.get("link")]
+        links.extend(batch_links)
+
+        start += batch_size
+        time.sleep(REQUEST_DELAY)
+
+    if not links:
+        return [], "Aucun résultat CSE"
+
+    seen = set()
+    unique_links: List[str] = []
+    for url in links:
+        if url not in seen:
+            seen.add(url)
+            unique_links.append(url)
+
+    return unique_links, ""
 
 
 def extract_emails_from_html(html: str) -> Set[str]:
@@ -136,35 +178,11 @@ def fetch_page(url: str) -> Tuple[Response | None, str]:
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
         response.raise_for_status()
         return response, ""
     except RequestException as exc:
         return None, f"Erreur HTTP: {exc}"
-
-
-def process_target(name: str, api_key: str, cx_id: str) -> Tuple[str, str]:
-    """Retourne un couple (site, emails ou message d'erreur) pour un nom donné."""
-
-    site_url, search_error = fetch_first_result(name, api_key, cx_id)
-    if search_error:
-        return "", f"Recherche: {search_error}"
-
-    response, http_error = fetch_page(site_url)
-    if http_error and not response:
-        return site_url, http_error
-
-    emails: Set[str] = set()
-    if response is not None:
-        emails = extract_emails_from_html(response.text)
-
-    if not emails and http_error:
-        # Aucun email trouvé et une erreur HTTP a eu lieu (ex: code 200 sans contenu utile).
-        return site_url, http_error
-
-    emails_str = "; ".join(sorted(emails)) if emails else ""
-    return site_url, emails_str or "Aucun email détecté"
-
 
 def main() -> int:
     try:
@@ -177,12 +195,38 @@ def main() -> int:
         ws_in, ws_out = connect_worksheets(creds_path)
         targets = read_targets(ws_in)
 
-        results: List[List[str]] = [["Nom de la Cible", "Site Internet", "Mails"]]
+        results: List[List[str]] = [["Cible", "Site Internet", "Mails"]]
 
-        for company in targets:
-            site, emails_or_error = process_target(company, api_key, cx_id)
-            results.append([company, site, emails_or_error])
-            time.sleep(1)  # Throttle léger pour respecter les quotas.
+        for query in targets:
+            links, search_error = fetch_results_paginated(query, api_key, cx_id, MAX_RESULTS)
+            if search_error and not links:
+                results.append([query, "", f"Recherche: {search_error}"])
+                time.sleep(REQUEST_DELAY)
+                continue
+
+            for link in links:
+                response, http_error = fetch_page(link)
+                emails: Set[str] = set()
+
+                if response is not None:
+                    emails |= extract_emails_from_html(response.text)
+
+                    if DEEP_SCRAPE:
+                        base_url = response.url or link
+                        for path in EXTRA_PATHS:
+                            extra_url = urljoin(base_url, path)
+                            extra_response, _ = fetch_page(extra_url)
+                            if extra_response is not None:
+                                emails |= extract_emails_from_html(extra_response.text)
+                                time.sleep(REQUEST_DELAY)
+
+                if http_error and not emails:
+                    results.append([query, link, f"Scraping: {http_error}"])
+                else:
+                    emails_str = "; ".join(sorted(emails)) if emails else "Aucun email détecté"
+                    results.append([query, link, emails_str])
+
+                time.sleep(REQUEST_DELAY)
 
         ws_out.clear()
         ws_out.update("A1", results)
