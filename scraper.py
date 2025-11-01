@@ -15,8 +15,9 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import List, Set, Tuple
+from typing import Dict, List, Set, Tuple
 from urllib.parse import urljoin, urlparse
+from datetime import datetime
 
 import gspread
 import requests
@@ -268,10 +269,21 @@ def extract_emails_from_html(html: str) -> Set[str]:
     return emails
 
 
-def fetch_sites_from_perplexity(query: str, max_sites: int) -> Tuple[List[str], str]:
+def fetch_sites_from_perplexity(
+    query: str,
+    max_sites: int,
+    exclude: Set[str] | None = None,
+) -> Tuple[List[str], str]:
     api_key = os.getenv("PERPLEXITY_API_KEY")
     if not api_key:
         return [], "PERPLEXITY_API_KEY manquante"
+
+    exclude = exclude or set()
+    avoid_clause = (
+        "\nÉvite absolument ces URL déjà vues: " + ", ".join(sorted(exclude))
+        if exclude
+        else ""
+    )
 
     payload = {
         "model": PERPLEXITY_MODEL,
@@ -289,7 +301,7 @@ def fetch_sites_from_perplexity(query: str, max_sites: int) -> Tuple[List[str], 
                 "role": "user",
                 "content": (
                     f"Fournis jusqu'à {max_sites} sites web actifs et pertinents en France pour: '{query}'. "
-                    "Priorise les domaines francophones/ou français. Pas de doublons."
+                    "Priorise les domaines francophones/ou français. Pas de doublons." + avoid_clause
                 ),
             },
         ],
@@ -362,6 +374,7 @@ def generate_candidate_links(
     api_key: str,
     cx_id: str,
     max_results: int,
+    exclude: Set[str] | None = None,
 ) -> Tuple[List[Tuple[str, str]], str]:
     cleaned = query.strip()
     if not cleaned:
@@ -373,9 +386,18 @@ def generate_candidate_links(
     if is_url(cleaned):
         return [(cleaned, "input")], ""
 
-    llm_urls, llm_error = fetch_sites_from_perplexity(cleaned, PERPLEXITY_MAX_SITES)
+    already_seen = exclude or set()
+
+    llm_urls, llm_error = fetch_sites_from_perplexity(
+        cleaned,
+        PERPLEXITY_MAX_SITES,
+        already_seen,
+    )
     if llm_urls:
         for url in llm_urls:
+            if url in already_seen:
+                continue
+            already_seen.add(url)
             links.append((url, "perplexity"))
     elif llm_error:
         errors.append(llm_error)
@@ -384,6 +406,9 @@ def generate_candidate_links(
         cse_urls, cse_error = fetch_results_paginated(cleaned, api_key, cx_id, max_results)
         if cse_urls:
             for url in cse_urls:
+                if url in already_seen:
+                    continue
+                already_seen.add(url)
                 links.append((url, "cse"))
         elif cse_error:
             errors.append(cse_error)
@@ -424,19 +449,12 @@ def main() -> int:
         targets = read_targets(ws_in)
         print(f"Cibles lues: {len(targets)}")
 
+        run_timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
         header = ["Cible", "Site Internet", "Mails"]
-        collected_rows: List[List[str]] = []
+
+        site_records: Dict[str, dict] = {}
         collected_emails: Set[str] = set()
         processed_links: Set[str] = set()
-
-        def record_email(query_label: str, link_url: str, source_prefix: str, email_value: str) -> None:
-            normalized = email_value.lower()
-            if not is_probable_email(email_value):
-                return
-            if normalized in collected_emails:
-                return
-            collected_emails.add(normalized)
-            collected_rows.append([query_label, link_url, f"{source_prefix}{email_value}"])
 
         for iteration in range(1, MAX_ITERATIONS + 1):
             if len(collected_emails) >= TARGET_EMAIL_COUNT:
@@ -447,7 +465,13 @@ def main() -> int:
                 if len(collected_emails) >= TARGET_EMAIL_COUNT:
                     break
 
-                candidates, source_error = generate_candidate_links(query, api_key, cx_id, MAX_RESULTS)
+                candidates, source_error = generate_candidate_links(
+                    query,
+                    api_key,
+                    cx_id,
+                    MAX_RESULTS,
+                    processed_links,
+                )
                 if source_error:
                     print(f"Info - {query}: {source_error}")
 
@@ -462,7 +486,6 @@ def main() -> int:
                         continue
                     processed_links.add(link)
 
-                    source_prefix = f"{SOURCE_LABELS.get(origin, origin)} | "
                     host = (urlparse(link).hostname or "").lower()
                     tld = host.split(".")[-1] if host else ""
                     if ALLOW_TLDS and tld and tld not in ALLOW_TLDS:
@@ -472,11 +495,22 @@ def main() -> int:
                     if any(host.endswith(d) for d in BLOCKED_DOMAINS):
                         continue
 
+                    record = site_records.setdefault(
+                        link,
+                        {
+                            "queries": set(),
+                            "sources": set(),
+                            "emails": set(),
+                        },
+                    )
+                    record["queries"].add(query)
+                    record["sources"].add(SOURCE_LABELS.get(origin, origin))
+
                     response, http_error = fetch_page(link)
-                    emails: Set[str] = set()
+                    emails_found: Set[str] = set()
 
                     if response is not None:
-                        emails |= extract_emails_from_html(response.text)
+                        emails_found |= extract_emails_from_html(response.text)
 
                         if DEEP_SCRAPE:
                             base_url = response.url or link
@@ -484,7 +518,7 @@ def main() -> int:
                                 extra_url = urljoin(base_url, path)
                                 extra_response, _ = fetch_page(extra_url)
                                 if extra_response is not None:
-                                    emails |= extract_emails_from_html(extra_response.text)
+                                    emails_found |= extract_emails_from_html(extra_response.text)
                                     time.sleep(REQUEST_DELAY)
 
                             try:
@@ -500,45 +534,55 @@ def main() -> int:
                                 for extra_url in list(discovered)[:10]:
                                     r2, _ = fetch_page(extra_url)
                                     if r2 is not None:
-                                        emails |= extract_emails_from_html(r2.text)
+                                        emails_found |= extract_emails_from_html(r2.text)
                                         time.sleep(REQUEST_DELAY)
                             except Exception:
                                 pass
 
-                    if http_error and not emails:
+                    if http_error and not emails_found:
                         continue
 
-                    if emails:
-                        for email in sorted(emails):
-                            record_email(query, link, source_prefix, email)
-                            if len(collected_emails) >= TARGET_EMAIL_COUNT:
-                                break
+                    for email in sorted(emails_found):
+                        if not is_probable_email(email):
+                            continue
+                        normalized = email.lower()
+                        if normalized in collected_emails:
+                            continue
+                        collected_emails.add(normalized)
+                        record["emails"].add(email)
+                        if len(collected_emails) >= TARGET_EMAIL_COUNT:
+                            break
 
                     time.sleep(REQUEST_DELAY)
 
-        results: List[List[str]] = [header]
-        results.extend(collected_rows)
+        rows: List[List[str]] = []
+        for link, data in site_records.items():
+            if not data["emails"]:
+                continue
+            queries_str = "; ".join(sorted(data["queries"]))
+            sources_str = ", ".join(sorted(data["sources"]))
+            emails_str = "; ".join(sorted(data["emails"]))
+            rows.append([queries_str, link, f"{sources_str} | {emails_str}"])
 
-        if not collected_rows:
-            print("Aucun email valide collecté.")
+        rows.sort(key=lambda row: (row[0], row[1]))
+
+        output: List[List[str]] = [[f"Run {run_timestamp}", "", ""], header]
+        output.extend(rows)
 
         if APPEND_MODE:
             existing = ws_out.get_all_values()
-            if existing:
-                values_to_write = results[1:] if collected_rows else []
-                if values_to_write:
-                    start_row = len(existing) + 1
-                    ws_out.update(range_name=f"A{start_row}", values=values_to_write)
-                    print(f"Écriture OK (append): +{len(values_to_write)} lignes.")
-                else:
-                    print("Aucune nouvelle ligne à ajouter.")
-            else:
-                ws_out.update(range_name="A1", values=results)
-                print(f"Écriture OK (append init): {len(results) - 1} lignes.")
+            start_row = len(existing) + 1 if existing else 1
+            ws_out.update(range_name=f"A{start_row}", values=output)
+            print(f"Écriture OK (append run): +{len(output) - 2} lignes utiles.")
         else:
             ws_out.clear()
-            ws_out.update(range_name="A1", values=results)
-            print(f"Écriture OK (replace): {len(results) - 1} lignes.")
+            ws_out.update(range_name="A1", values=output)
+            print(f"Écriture OK (replace): {len(output) - 2} lignes utiles.")
+
+        if len(collected_emails) < TARGET_EMAIL_COUNT:
+            print(
+                f"Objectif non atteint: {len(collected_emails)} emails collectés sur {TARGET_EMAIL_COUNT}."
+            )
 
         return 0
 
