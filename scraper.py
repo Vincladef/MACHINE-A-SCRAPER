@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 from typing import List, Set, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import gspread
 import requests
@@ -39,6 +39,35 @@ EXTRA_PATHS = [
     "/a-propos",
     "/mentions-legales",
 ]
+
+# Filtres anti-faux positifs et domaines problématiques
+BAD_TLDS = {"png", "jpg", "jpeg", "gif", "webp", "svg", "css", "js", "ico", "pdf", "xml", "json"}
+BLOCKED_DOMAINS = {
+    "reddit.com",
+    "upwork.com",
+    "salesforce.com",
+    "tealhq.com",
+    "facebook.com",
+    "linkedin.com",
+    "instagram.com",
+    "x.com",
+    "youtube.com",
+}
+
+
+def is_probable_email(addr: str) -> bool:
+    if len(addr) > 254:
+        return False
+    local, _, domain = addr.partition("@");
+    if not local or not domain or len(local) > 64:
+        return False
+    parts = domain.lower().split(".")
+    if len(parts) < 2:
+        return False
+    tld = parts[-1]
+    if tld in BAD_TLDS:
+        return False
+    return True
 
 
 class ScraperError(RuntimeError):
@@ -167,18 +196,22 @@ def fetch_results_paginated(
 
 
 def extract_emails_from_html(html: str) -> Set[str]:
-    """Retourne l'ensemble des emails trouvés dans le HTML (texte et liens mailto)."""
+    """Retourne l'ensemble des emails probables trouvés dans le HTML."""
 
-    emails = set(EMAIL_REGEX.findall(html))
+    emails: Set[str] = set()
 
+    # 1) Regex directe
+    for candidate in EMAIL_REGEX.findall(html):
+        if is_probable_email(candidate):
+            emails.add(candidate)
+
+    # 2) Liens mailto
     soup = BeautifulSoup(html, "html.parser")
     for anchor in soup.find_all("a"):
-        href = anchor.get("href")
-        if not href:
-            continue
+        href = anchor.get("href") or ""
         if href.startswith("mailto:"):
-            candidate = href[7:].split("?")[0].strip()
-            if candidate and EMAIL_REGEX.fullmatch(candidate):
+            candidate = href.replace("mailto:", "").split("?")[0].strip()
+            if candidate and re.fullmatch(EMAIL_REGEX, candidate) and is_probable_email(candidate):
                 emails.add(candidate)
 
     return emails
@@ -220,6 +253,13 @@ def main() -> int:
                 continue
 
             for link in links:
+                # Ignorer certains domaines connus pour bloquer le scraping
+                host = (urlparse(link).hostname or "").lower()
+                if any(host.endswith(d) for d in BLOCKED_DOMAINS):
+                    results.append([query, link, "Ignoré: domaine qui bloque le scraping"])
+                    time.sleep(REQUEST_DELAY)
+                    continue
+
                 response, http_error = fetch_page(link)
                 emails: Set[str] = set()
 
@@ -234,6 +274,26 @@ def main() -> int:
                             if extra_response is not None:
                                 emails |= extract_emails_from_html(extra_response.text)
                                 time.sleep(REQUEST_DELAY)
+
+                        # Découverte dynamique des liens contact/about dans la page
+                        try:
+                            soup = BeautifulSoup(response.text, "html.parser")
+                            keywords = ("contact", "about", "à propos", "a propos", "support", "legal", "mentions", "impressum")
+                            discovered = set()
+                            for a in soup.find_all("a"):
+                                text = (a.get_text() or "").lower().strip()
+                                href = a.get("href") or ""
+                                if href and any(k in text for k in keywords):
+                                    discovered.add(urljoin(base_url, href))
+
+                            for extra_url in list(discovered)[:5]:
+                                r2, _ = fetch_page(extra_url)
+                                if r2 is not None:
+                                    emails |= extract_emails_from_html(r2.text)
+                                    time.sleep(REQUEST_DELAY)
+                        except Exception:
+                            # En cas d'erreur d'analyse HTML, on ignore silencieusement
+                            pass
 
                 if http_error and not emails:
                     results.append([query, link, f"Scraping: {http_error}"])
