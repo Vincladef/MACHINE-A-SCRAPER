@@ -74,6 +74,12 @@ def connect_worksheets(creds_path: Path) -> Tuple[gspread.Worksheet, gspread.Wor
     sheet_id = get_env_var("GOOGLE_SHEET_ID")
     spreadsheet = gc.open_by_key(sheet_id)
 
+    print(
+        "Feuille cible: "
+        f"https://docs.google.com/spreadsheets/d/{sheet_id} "
+        f"(titre: {spreadsheet.title})"
+    )
+
     ws_in = spreadsheet.worksheet("Feuille 1")
     try:
         ws_out = spreadsheet.worksheet("Feuille 2")
@@ -194,6 +200,7 @@ def main() -> int:
 
         ws_in, ws_out = connect_worksheets(creds_path)
         targets = read_targets(ws_in)
+        print(f"Cibles lues: {len(targets)}")
 
         results: List[List[str]] = [["Cible", "Site Internet", "Mails"]]
 
@@ -229,7 +236,8 @@ def main() -> int:
                 time.sleep(REQUEST_DELAY)
 
         ws_out.clear()
-        ws_out.update("A1", results)
+        ws_out.update(range_name="A1", values=results)
+        print(f"Écriture OK: {len(results) - 1} lignes.")
 
         return 0
 
