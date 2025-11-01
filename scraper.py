@@ -40,6 +40,11 @@ ALLOW_TLDS = {t for t in os.getenv("ALLOW_TLDS", "fr").lower().split(",") if t}
 SKIP_SUBS = {s.strip().lower() for s in os.getenv("SKIP_SUBS", "blog.,docs.,help.,support.").split(",") if s}
 MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "10"))
 TARGET_EMAIL_COUNT = int(os.getenv("TARGET_EMAIL_COUNT", "100"))
+SCRAPER_MODE = os.getenv("SCRAPER_MODE", "scrape_emails").lower()
+INPUT_SHEET_NAME = os.getenv("INPUT_SHEET_NAME", "Feuille 1")
+SITES_SHEET_NAME = os.getenv("SITES_SHEET_NAME", "Feuille 2")
+EMAILS_SHEET_NAME = os.getenv("EMAILS_SHEET_NAME", "Feuille 3")
+TARGET_SITE_COUNT = int(os.getenv("TARGET_SITE_COUNT", "100"))
 EXTRA_PATHS = [
     "/contact",
     "/contact-us",
@@ -144,8 +149,10 @@ def write_credentials_file(path: Path) -> None:
     path.write_text(json.dumps(data), encoding="utf-8")
 
 
-def connect_worksheets(creds_path: Path) -> Tuple[gspread.Worksheet, gspread.Worksheet]:
-    """Retourne les worksheets de lecture et écriture."""
+def connect_worksheets(
+    creds_path: Path,
+) -> Tuple[gspread.Worksheet, gspread.Worksheet, gspread.Worksheet]:
+    """Retourne les worksheets de lecture, sites et emails."""
 
     gc = gspread.service_account(filename=str(creds_path))
     sheet_id = get_env_var("GOOGLE_SHEET_ID")
@@ -157,13 +164,17 @@ def connect_worksheets(creds_path: Path) -> Tuple[gspread.Worksheet, gspread.Wor
         f"(titre: {spreadsheet.title})"
     )
 
-    ws_in = spreadsheet.worksheet("Feuille 1")
-    try:
-        ws_out = spreadsheet.worksheet("Feuille 2")
-    except gspread.WorksheetNotFound:
-        ws_out = spreadsheet.add_worksheet(title="Feuille 2", rows=1000, cols=3)
+    def get_or_create(name: str) -> gspread.Worksheet:
+        try:
+            return spreadsheet.worksheet(name)
+        except gspread.WorksheetNotFound:
+            return spreadsheet.add_worksheet(title=name, rows=1000, cols=3)
 
-    return ws_in, ws_out
+    ws_input = get_or_create(INPUT_SHEET_NAME)
+    ws_sites = get_or_create(SITES_SHEET_NAME)
+    ws_emails = get_or_create(EMAILS_SHEET_NAME)
+
+    return ws_input, ws_sites, ws_emails
 
 
 def read_targets(ws_in: gspread.Worksheet) -> List[str]:
@@ -439,6 +450,248 @@ def generate_candidate_links(
     return deduped, "; ".join(errors)
 
 
+def collect_sites_mode(
+    targets: List[str],
+    ws_sites: gspread.Worksheet,
+    api_key: str,
+    cx_id: str,
+) -> int:
+    if not targets:
+        print("Aucune cible fournie dans la feuille d'entrée.")
+        ws_sites.clear()
+        ws_sites.update("A1", [["Run - aucun", "", ""], ["Cible", "Site Internet", "Source"]])
+        return 0
+
+    run_timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    sites: Dict[str, Dict[str, Set[str]]] = {}
+    processed_links: Set[str] = set()
+    perplexity_available = bool(os.getenv("PERPLEXITY_API_KEY"))
+
+    base_allowed_tlds = set(ALLOW_TLDS)
+    fallback_sequence = [t for t in FALLBACK_TLDS if t and t not in base_allowed_tlds]
+
+    for iteration in range(1, MAX_ITERATIONS + 1):
+        if len(sites) >= TARGET_SITE_COUNT:
+            break
+
+        allowed_tlds = set(base_allowed_tlds)
+        if fallback_sequence:
+            newly_added = fallback_sequence[: max(0, iteration - 1)]
+            if newly_added:
+                allowed_tlds.update(newly_added)
+                print(f"Itération {iteration}: TLDs autorisés -> {', '.join(sorted(allowed_tlds))}")
+
+        for query in targets:
+            if len(sites) >= TARGET_SITE_COUNT:
+                break
+
+            candidates, source_error = generate_candidate_links(
+                query,
+                api_key,
+                cx_id,
+                MAX_RESULTS,
+                processed_links,
+                use_perplexity=perplexity_available,
+            )
+            if source_error:
+                print(f"Info sites - {query}: {source_error}")
+
+            if not candidates:
+                continue
+
+            for link, origin in candidates:
+                if len(sites) >= TARGET_SITE_COUNT:
+                    break
+
+                host = (urlparse(link).hostname or "").lower()
+                tld = host.split(".")[-1] if host else ""
+                if allowed_tlds and tld and tld not in allowed_tlds:
+                    continue
+                if SKIP_SUBS and any(host.startswith(prefix) for prefix in SKIP_SUBS):
+                    continue
+                if any(host.endswith(d) for d in BLOCKED_DOMAINS):
+                    continue
+
+                record = sites.setdefault(link, {"queries": set(), "sources": set()})
+                record["queries"].add(query)
+                record["sources"].add(SOURCE_LABELS.get(origin, origin))
+                processed_links.add(link)
+
+                if len(sites) >= TARGET_SITE_COUNT:
+                    break
+
+            time.sleep(REQUEST_DELAY)
+
+    rows: List[List[str]] = []
+    for url, data in sites.items():
+        queries = "; ".join(sorted(data["queries"]))
+        sources = ", ".join(sorted(data["sources"]))
+        rows.append([queries, url, sources])
+
+    rows.sort(key=lambda row: (row[0], row[1]))
+
+    output: List[List[str]] = [[f"Run {run_timestamp}", "", ""], ["Cible", "Site Internet", "Source"]]
+    output.extend(rows)
+
+    ws_sites.clear()
+    if output:
+        ws_sites.update(range_name="A1", values=output)
+
+    print(f"Sites collectés: {len(rows)} / {TARGET_SITE_COUNT}")
+    if len(rows) < TARGET_SITE_COUNT:
+        print("Objectif de sites non atteint - complétez manuellement ou relancez.")
+
+    return 0
+
+
+def scrape_emails_mode(
+    ws_sites: gspread.Worksheet,
+    ws_emails: gspread.Worksheet,
+    api_key: str,
+    cx_id: str,
+) -> int:
+    site_values = ws_sites.get_all_values()
+    site_entries: List[Dict[str, str]] = []
+
+    for row in site_values:
+        if not row or all(not (cell or "").strip() for cell in row):
+            continue
+        first = (row[0] or "").strip()
+        if first.startswith("Run "):
+            continue
+        if first.lower() == "cible":
+            continue
+
+        url = (row[1] if len(row) > 1 else "").strip()
+        if not url:
+            continue
+        source = (row[2] if len(row) > 2 else "").strip()
+        site_entries.append({
+            "target": first,
+            "url": url,
+            "source": source,
+        })
+
+    if not site_entries:
+        print("Aucun site à scraper dans la feuille des sites.")
+        return 0
+
+    site_records: Dict[str, Dict[str, Set[str]]] = {}
+    ordered_urls: List[str] = []
+
+    for entry in site_entries:
+        url = entry["url"]
+        record = site_records.get(url)
+        if record is None:
+            record = {
+                "queries": set(),
+                "sources": set(),
+                "emails": set(),
+            }
+            site_records[url] = record
+            ordered_urls.append(url)
+        if entry["target"]:
+            record["queries"].add(entry["target"])
+        if entry["source"]:
+            record["sources"].add(entry["source"])
+
+    collected_emails: Set[str] = set()
+    allowed_tlds = set(ALLOW_TLDS) | set(FALLBACK_TLDS)
+
+    for url in ordered_urls:
+        if TARGET_EMAIL_COUNT and len(collected_emails) >= TARGET_EMAIL_COUNT:
+            break
+
+        record = site_records[url]
+        host = (urlparse(url).hostname or "").lower()
+        tld = host.split(".")[-1] if host else ""
+        if allowed_tlds and tld and tld not in allowed_tlds:
+            continue
+        if SKIP_SUBS and any(host.startswith(prefix) for prefix in SKIP_SUBS):
+            continue
+        if any(host.endswith(d) for d in BLOCKED_DOMAINS):
+            continue
+
+        response, http_error = fetch_page(url)
+        emails_found: Set[str] = set()
+
+        if response is not None:
+            emails_found |= extract_emails_from_html(response.text)
+
+            if DEEP_SCRAPE:
+                base_url = response.url or url
+                for path in EXTRA_PATHS:
+                    extra_url = urljoin(base_url, path)
+                    extra_response, _ = fetch_page(extra_url)
+                    if extra_response is not None:
+                        emails_found |= extract_emails_from_html(extra_response.text)
+                        time.sleep(REQUEST_DELAY)
+
+                try:
+                    soup = BeautifulSoup(response.text, "html.parser")
+                    keywords = ("contact", "about", "à propos", "a propos", "support", "legal", "mentions", "impressum")
+                    discovered = set()
+                    for a in soup.find_all("a"):
+                        text = (a.get_text() or "").lower().strip()
+                        href = a.get("href") or ""
+                        if href and any(k in text for k in keywords):
+                            discovered.add(urljoin(base_url, href))
+
+                    for extra_url in list(discovered)[:10]:
+                        r2, _ = fetch_page(extra_url)
+                        if r2 is not None:
+                            emails_found |= extract_emails_from_html(r2.text)
+                            time.sleep(REQUEST_DELAY)
+                except Exception:
+                    pass
+
+        if http_error and not emails_found:
+            continue
+
+        for email in sorted(emails_found):
+            if not is_probable_email(email):
+                continue
+            normalized = email.lower()
+            if normalized in collected_emails:
+                continue
+            collected_emails.add(normalized)
+            record["emails"].add(email)
+            if TARGET_EMAIL_COUNT and len(collected_emails) >= TARGET_EMAIL_COUNT:
+                break
+
+        time.sleep(REQUEST_DELAY)
+
+    run_timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    rows: List[List[str]] = []
+    for url in ordered_urls:
+        record = site_records[url]
+        if not record["emails"]:
+            continue
+        queries = "; ".join(sorted(record["queries"]))
+        sources = ", ".join(sorted(record["sources"]))
+        emails = "; ".join(sorted(record["emails"]))
+        rows.append([queries, url, f"{sources} | {emails}" if sources else emails])
+
+    rows.sort(key=lambda row: (row[0], row[1]))
+
+    output: List[List[str]] = [[f"Run {run_timestamp}", "", ""], ["Cible", "Site Internet", "Mails"]]
+    output.extend(rows)
+
+    existing_emails = ws_emails.get_all_values() if APPEND_MODE else []
+    if APPEND_MODE and existing_emails:
+        start_row = len(existing_emails) + 1
+        ws_emails.update(range_name=f"A{start_row}", values=output)
+    else:
+        ws_emails.clear()
+        ws_emails.update(range_name="A1", values=output)
+
+    print(f"Emails collectés: {len(collected_emails)} / {TARGET_EMAIL_COUNT}")
+    if len(collected_emails) < TARGET_EMAIL_COUNT:
+        print("Objectif d'emails non atteint - relance possible après enrichissement des sites.")
+
+    return 0
+
+
 def fetch_page(url: str) -> Tuple[Response | None, str]:
     """Télécharge la page web cible et retourne la réponse."""
 
@@ -461,164 +714,17 @@ def main() -> int:
         creds_path = Path(CREDS_FILENAME)
         write_credentials_file(creds_path)
 
-        ws_in, ws_out = connect_worksheets(creds_path)
-        targets = read_targets(ws_in)
+        ws_input, ws_sites, ws_emails = connect_worksheets(creds_path)
+        targets = read_targets(ws_input)
         print(f"Cibles lues: {len(targets)}")
 
-        run_timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        header = ["Cible", "Site Internet", "Mails"]
+        if SCRAPER_MODE == "collect_sites":
+            return collect_sites_mode(targets, ws_sites, api_key, cx_id)
+        if SCRAPER_MODE == "scrape_emails":
+            return scrape_emails_mode(ws_sites, ws_emails, api_key, cx_id)
 
-        site_records: Dict[str, dict] = {}
-        collected_emails: Set[str] = set()
-        processed_links: Set[str] = set()
-
-        perplexity_available = bool(os.getenv("PERPLEXITY_API_KEY"))
-        print(f"Perplexity activé: {'oui' if perplexity_available else 'non'}")
-
-        base_allowed_tlds = set(ALLOW_TLDS)
-        fallback_sequence = [t for t in FALLBACK_TLDS if t and t not in base_allowed_tlds]
-
-        for iteration in range(1, MAX_ITERATIONS + 1):
-            if len(collected_emails) >= TARGET_EMAIL_COUNT:
-                break
-            print(f"Iteration {iteration}/{MAX_ITERATIONS} - emails collectés: {len(collected_emails)}")
-
-            allowed_tlds = set(base_allowed_tlds)
-            if fallback_sequence:
-                newly_added = fallback_sequence[: max(0, iteration - 1)]
-                if newly_added:
-                    allowed_tlds.update(newly_added)
-                    print(f"TLDs autorisés: {', '.join(sorted(allowed_tlds))}")
-
-            emails_before_iteration = len(collected_emails)
-
-            for query in targets:
-                if len(collected_emails) >= TARGET_EMAIL_COUNT:
-                    break
-
-                candidates, source_error = generate_candidate_links(
-                    query,
-                    api_key,
-                    cx_id,
-                    MAX_RESULTS,
-                    processed_links,
-                    use_perplexity=perplexity_available,
-                )
-                if source_error:
-                    print(f"Info - {query}: {source_error}")
-
-                if not candidates:
-                    continue
-
-                for link, origin in candidates:
-                    if len(collected_emails) >= TARGET_EMAIL_COUNT:
-                        break
-
-                    if link in processed_links:
-                        continue
-                    processed_links.add(link)
-
-                    host = (urlparse(link).hostname or "").lower()
-                    tld = host.split(".")[-1] if host else ""
-                    if allowed_tlds and tld and tld not in allowed_tlds:
-                        continue
-                    if SKIP_SUBS and any(host.startswith(prefix) for prefix in SKIP_SUBS):
-                        continue
-                    if any(host.endswith(d) for d in BLOCKED_DOMAINS):
-                        continue
-
-                    record = site_records.setdefault(
-                        link,
-                        {
-                            "queries": set(),
-                            "sources": set(),
-                            "emails": set(),
-                        },
-                    )
-                    record["queries"].add(query)
-                    record["sources"].add(SOURCE_LABELS.get(origin, origin))
-
-                    response, http_error = fetch_page(link)
-                    emails_found: Set[str] = set()
-
-                    if response is not None:
-                        emails_found |= extract_emails_from_html(response.text)
-
-                        if DEEP_SCRAPE:
-                            base_url = response.url or link
-                            for path in EXTRA_PATHS:
-                                extra_url = urljoin(base_url, path)
-                                extra_response, _ = fetch_page(extra_url)
-                                if extra_response is not None:
-                                    emails_found |= extract_emails_from_html(extra_response.text)
-                                    time.sleep(REQUEST_DELAY)
-
-                            try:
-                                soup = BeautifulSoup(response.text, "html.parser")
-                                keywords = ("contact", "about", "à propos", "a propos", "support", "legal", "mentions", "impressum")
-                                discovered = set()
-                                for a in soup.find_all("a"):
-                                    text = (a.get_text() or "").lower().strip()
-                                    href = a.get("href") or ""
-                                    if href and any(k in text for k in keywords):
-                                        discovered.add(urljoin(base_url, href))
-
-                                for extra_url in list(discovered)[:10]:
-                                    r2, _ = fetch_page(extra_url)
-                                    if r2 is not None:
-                                        emails_found |= extract_emails_from_html(r2.text)
-                                        time.sleep(REQUEST_DELAY)
-                            except Exception:
-                                pass
-
-                    if http_error and not emails_found:
-                        continue
-
-                    for email in sorted(emails_found):
-                        if not is_probable_email(email):
-                            continue
-                        normalized = email.lower()
-                        if normalized in collected_emails:
-                            continue
-                        collected_emails.add(normalized)
-                        record["emails"].add(email)
-                        if len(collected_emails) >= TARGET_EMAIL_COUNT:
-                            break
-
-                    time.sleep(REQUEST_DELAY)
-            if len(collected_emails) == emails_before_iteration:
-                print("Aucune progression sur cette itération.")
-
-        rows: List[List[str]] = []
-        for link, data in site_records.items():
-            if not data["emails"]:
-                continue
-            queries_str = "; ".join(sorted(data["queries"]))
-            sources_str = ", ".join(sorted(data["sources"]))
-            emails_str = "; ".join(sorted(data["emails"]))
-            rows.append([queries_str, link, f"{sources_str} | {emails_str}"])
-
-        rows.sort(key=lambda row: (row[0], row[1]))
-
-        output: List[List[str]] = [[f"Run {run_timestamp}", "", ""], header]
-        output.extend(rows)
-
-        if APPEND_MODE:
-            existing = ws_out.get_all_values()
-            start_row = len(existing) + 1 if existing else 1
-            ws_out.update(range_name=f"A{start_row}", values=output)
-            print(f"Écriture OK (append run): +{len(output) - 2} lignes utiles.")
-        else:
-            ws_out.clear()
-            ws_out.update(range_name="A1", values=output)
-            print(f"Écriture OK (replace): {len(output) - 2} lignes utiles.")
-
-        if len(collected_emails) < TARGET_EMAIL_COUNT:
-            print(
-                f"Objectif non atteint: {len(collected_emails)} emails collectés sur {TARGET_EMAIL_COUNT}."
-            )
-
-        return 0
+        print(f"Mode SCRAPER_MODE inconnu: {SCRAPER_MODE}")
+        return 1
 
     except ScraperError as exc:
         print(f"Erreur de configuration: {exc}", file=sys.stderr)

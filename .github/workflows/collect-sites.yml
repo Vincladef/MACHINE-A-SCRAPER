@@ -1,16 +1,13 @@
-name: Scrape Emails
+name: Collect Sites
 
 on:
   workflow_dispatch:
-  # Décommente pour planifier (ex.: tous les jours à 06:00 UTC)
-  # schedule:
-  #   - cron: "0 6 * * *"
 
 jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      SCRAPER_MODE: "scrape_emails"
+      SCRAPER_MODE: "collect_sites"
       CSE_API_KEY: ${{ secrets.CSE_API_KEY }}
       CSE_CX_ID: ${{ secrets.CSE_CX_ID }}
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
@@ -18,12 +15,12 @@ jobs:
       PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
       INPUT_SHEET_NAME: "Feuille 1"
       SITES_SHEET_NAME: "Feuille 2"
-      EMAILS_SHEET_NAME: "Feuille 3"
-      DEEP_SCRAPE: "true"
-      MAX_RESULTS: "10"
+      TARGET_SITE_COUNT: "100"
+      MAX_ITERATIONS: "12"
+      PERPLEXITY_MAX_SITES: "40"
+      PERPLEXITY_RETRIES: "4"
       REQUEST_DELAY: "1.0"
       HTTP_TIMEOUT: "10"
-      APPEND_MODE: "false"
       CSE_LR: "lang_fr"
       CSE_GL: "fr"
       CSE_CR: "countryFR"
@@ -31,10 +28,6 @@ jobs:
       EXTRA_QUERY: "site officiel contact email"
       EXCLUDE_TERMS: "reddit upwork linkedin indeed pinterest"
       SKIP_SUBS: "blog.,docs.,help.,support.,news.,jobs."
-      PERPLEXITY_MAX_SITES: "40"
-      PERPLEXITY_RETRIES: "4"
-      TARGET_EMAIL_COUNT: "100"
-      MAX_ITERATIONS: "12"
       FALLBACK_TLDS: "com,net,org,io,co,eu"
     steps:
       - name: Checkout
@@ -50,7 +43,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run scraper
+      - name: Collect sites via Perplexity
         run: |
           python scraper.py
-
