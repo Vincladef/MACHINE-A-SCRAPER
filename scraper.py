@@ -377,6 +377,7 @@ def generate_candidate_links(
     cx_id: str,
     max_results: int,
     exclude: Set[str] | None = None,
+    use_perplexity: bool = True,
 ) -> Tuple[List[Tuple[str, str]], str]:
     cleaned = query.strip()
     if not cleaned:
@@ -390,32 +391,32 @@ def generate_candidate_links(
 
     already_seen = set(exclude or set())
     perplexity_errors: List[str] = []
-    for attempt in range(PERPLEXITY_RETRIES):
-        urls, err = fetch_sites_from_perplexity(
-            cleaned,
-            PERPLEXITY_MAX_SITES,
-            already_seen,
-        )
-        if not urls:
-            if err:
-                perplexity_errors.append(f"Essai {attempt + 1}: {err}")
-            break
 
-        new_found = False
-        for url in urls:
-            if url in already_seen:
+    if use_perplexity:
+        for attempt in range(PERPLEXITY_RETRIES):
+            urls, err = fetch_sites_from_perplexity(
+                cleaned,
+                PERPLEXITY_MAX_SITES,
+                already_seen,
+            )
+            if not urls:
+                if err:
+                    perplexity_errors.append(f"Essai {attempt + 1}: {err}")
                 continue
-            already_seen.add(url)
-            links.append((url, "perplexity"))
-            new_found = True
 
-        if not new_found:
-            break
+            new_found = False
+            for url in urls:
+                if url in already_seen:
+                    continue
+                already_seen.add(url)
+                links.append((url, "perplexity"))
+                new_found = True
 
-    if links and perplexity_errors:
-        errors.extend(perplexity_errors)
-    elif not links and perplexity_errors:
-        errors.extend(perplexity_errors)
+            if not new_found:
+                break
+
+        if perplexity_errors:
+            errors.extend(perplexity_errors)
 
     if not links:
         cse_urls, cse_error = fetch_results_paginated(cleaned, api_key, cx_id, max_results)
@@ -471,6 +472,9 @@ def main() -> int:
         collected_emails: Set[str] = set()
         processed_links: Set[str] = set()
 
+        perplexity_available = bool(os.getenv("PERPLEXITY_API_KEY"))
+        print(f"Perplexity activé: {'oui' if perplexity_available else 'non'}")
+
         base_allowed_tlds = set(ALLOW_TLDS)
         fallback_sequence = [t for t in FALLBACK_TLDS if t and t not in base_allowed_tlds]
 
@@ -498,6 +502,7 @@ def main() -> int:
                     cx_id,
                     MAX_RESULTS,
                     processed_links,
+                    use_perplexity=perplexity_available,
                 )
                 if source_error:
                     print(f"Info - {query}: {source_error}")
@@ -581,10 +586,8 @@ def main() -> int:
                             break
 
                     time.sleep(REQUEST_DELAY)
-
             if len(collected_emails) == emails_before_iteration:
-                print("Aucune progression sur cette itération, arrêt anticipé.")
-                break
+                print("Aucune progression sur cette itération.")
 
         rows: List[List[str]] = []
         for link, data in site_records.items():

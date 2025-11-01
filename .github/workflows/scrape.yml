@@ -14,6 +14,7 @@ jobs:
       CSE_CX_ID: ${{ secrets.CSE_CX_ID }}
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
       GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+      PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
       DEEP_SCRAPE: "true"
       MAX_RESULTS: "10"
       REQUEST_DELAY: "1.0"
