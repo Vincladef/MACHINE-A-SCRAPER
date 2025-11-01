@@ -38,7 +38,7 @@ CSE_GL = os.getenv("CSE_GL", "fr")
 CSE_CR = os.getenv("CSE_CR", "countryFR")
 ALLOW_TLDS = {t for t in os.getenv("ALLOW_TLDS", "fr").lower().split(",") if t}
 SKIP_SUBS = {s.strip().lower() for s in os.getenv("SKIP_SUBS", "blog.,docs.,help.,support.").split(",") if s}
-MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "3"))
+MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "10"))
 TARGET_EMAIL_COUNT = int(os.getenv("TARGET_EMAIL_COUNT", "100"))
 EXTRA_PATHS = [
     "/contact",
@@ -68,6 +68,8 @@ PERPLEXITY_API_URL = os.getenv("PERPLEXITY_API_URL", "https://api.perplexity.ai/
 PERPLEXITY_MODEL = os.getenv("PERPLEXITY_MODEL", "llama-3.1-sonar-large-128k-chat")
 PERPLEXITY_TIMEOUT = int(os.getenv("PERPLEXITY_TIMEOUT", "30"))
 PERPLEXITY_MAX_SITES = int(os.getenv("PERPLEXITY_MAX_SITES", "40"))
+PERPLEXITY_RETRIES = int(os.getenv("PERPLEXITY_RETRIES", "3"))
+FALLBACK_TLDS = [t.strip().lower() for t in os.getenv("FALLBACK_TLDS", "com,net,org,io,co,eu").split(",") if t]
 
 SOURCE_LABELS = {
     "perplexity": "Perplexity",
@@ -386,21 +388,34 @@ def generate_candidate_links(
     if is_url(cleaned):
         return [(cleaned, "input")], ""
 
-    already_seen = exclude or set()
+    already_seen = set(exclude or set())
+    perplexity_errors: List[str] = []
+    for attempt in range(PERPLEXITY_RETRIES):
+        urls, err = fetch_sites_from_perplexity(
+            cleaned,
+            PERPLEXITY_MAX_SITES,
+            already_seen,
+        )
+        if not urls:
+            if err:
+                perplexity_errors.append(f"Essai {attempt + 1}: {err}")
+            break
 
-    llm_urls, llm_error = fetch_sites_from_perplexity(
-        cleaned,
-        PERPLEXITY_MAX_SITES,
-        already_seen,
-    )
-    if llm_urls:
-        for url in llm_urls:
+        new_found = False
+        for url in urls:
             if url in already_seen:
                 continue
             already_seen.add(url)
             links.append((url, "perplexity"))
-    elif llm_error:
-        errors.append(llm_error)
+            new_found = True
+
+        if not new_found:
+            break
+
+    if links and perplexity_errors:
+        errors.extend(perplexity_errors)
+    elif not links and perplexity_errors:
+        errors.extend(perplexity_errors)
 
     if not links:
         cse_urls, cse_error = fetch_results_paginated(cleaned, api_key, cx_id, max_results)
@@ -456,10 +471,22 @@ def main() -> int:
         collected_emails: Set[str] = set()
         processed_links: Set[str] = set()
 
+        base_allowed_tlds = set(ALLOW_TLDS)
+        fallback_sequence = [t for t in FALLBACK_TLDS if t and t not in base_allowed_tlds]
+
         for iteration in range(1, MAX_ITERATIONS + 1):
             if len(collected_emails) >= TARGET_EMAIL_COUNT:
                 break
             print(f"Iteration {iteration}/{MAX_ITERATIONS} - emails collectés: {len(collected_emails)}")
+
+            allowed_tlds = set(base_allowed_tlds)
+            if fallback_sequence:
+                newly_added = fallback_sequence[: max(0, iteration - 1)]
+                if newly_added:
+                    allowed_tlds.update(newly_added)
+                    print(f"TLDs autorisés: {', '.join(sorted(allowed_tlds))}")
+
+            emails_before_iteration = len(collected_emails)
 
             for query in targets:
                 if len(collected_emails) >= TARGET_EMAIL_COUNT:
@@ -488,7 +515,7 @@ def main() -> int:
 
                     host = (urlparse(link).hostname or "").lower()
                     tld = host.split(".")[-1] if host else ""
-                    if ALLOW_TLDS and tld and tld not in ALLOW_TLDS:
+                    if allowed_tlds and tld and tld not in allowed_tlds:
                         continue
                     if SKIP_SUBS and any(host.startswith(prefix) for prefix in SKIP_SUBS):
                         continue
@@ -554,6 +581,10 @@ def main() -> int:
                             break
 
                     time.sleep(REQUEST_DELAY)
+
+            if len(collected_emails) == emails_before_iteration:
+                print("Aucune progression sur cette itération, arrêt anticipé.")
+                break
 
         rows: List[List[str]] = []
         for link, data in site_records.items():

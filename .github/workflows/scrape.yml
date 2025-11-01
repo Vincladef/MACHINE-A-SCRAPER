@@ -27,8 +27,10 @@ jobs:
       EXCLUDE_TERMS: "reddit upwork linkedin indeed pinterest"
       SKIP_SUBS: "blog.,docs.,help.,support.,news.,jobs."
       PERPLEXITY_MAX_SITES: "40"
+      PERPLEXITY_RETRIES: "4"
       TARGET_EMAIL_COUNT: "100"
-      MAX_ITERATIONS: "5"
+      MAX_ITERATIONS: "12"
+      FALLBACK_TLDS: "com,net,org,io,co,eu"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
