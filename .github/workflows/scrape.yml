@@ -15,7 +15,7 @@ jobs:
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
       GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
       DEEP_SCRAPE: "true"
-      MAX_RESULTS: "100"
+      MAX_RESULTS: "10"
       REQUEST_DELAY: "1.0"
       HTTP_TIMEOUT: "10"
     steps:
