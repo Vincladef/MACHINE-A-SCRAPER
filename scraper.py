@@ -127,6 +127,14 @@ def fetch_results_paginated(
         try:
             response = requests.get(CSE_API_URL, params=params, timeout=HTTP_TIMEOUT)
             response.raise_for_status()
+        except requests.HTTPError as exc:  # type: ignore[attr-defined]
+            status_code = getattr(exc.response, "status_code", "HTTP")
+            detail = str(exc)
+            try:
+                detail = exc.response.json().get("error", {}).get("message") or detail
+            except Exception:
+                pass
+            return links, f"Erreur CSE {status_code}: {detail}"
         except RequestException as exc:
             return links, f"Erreur CSE: {exc}"
 
