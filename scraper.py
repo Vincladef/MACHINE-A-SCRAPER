@@ -377,30 +377,16 @@ def fetch_sites_from_gemini(
         except RequestException as exc:
             return None, f"Erreur Gemini: {exc}"
 
+    # Utilise strictement le modèle configuré et l'endpoint v1
     model_candidates = [GEMINI_MODEL]
-    # Ajoute la variante -001 si absente, sinon tente aussi la variante sans -001
-    if GEMINI_MODEL.endswith("-001"):
-        base = GEMINI_MODEL[:-4]
-        if base:
-            model_candidates.append(base)
-    else:
-        model_candidates.append(f"{GEMINI_MODEL}-001")
-
-    # Essaye v1 puis v1beta (v1beta autorise le schema strict)
-    endpoint_formats: List[Tuple[str, bool]] = [
-        ("https://generativelanguage.googleapis.com/v1/models/{model}:generateContent", False),
-        ("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent", True),
-    ]
 
     response: Response | None = None
     last_err = ""
-    for m in model_candidates:
-        for fmt, use_schema in endpoint_formats:
-            response, last_err = _attempt(m, fmt, use_schema)
-            if response is not None:
-                break
-        if response is not None:
-            break
+    # 1) Essai avec schéma JSON forcé
+    response, last_err = _attempt(GEMINI_MODEL, GEMINI_API_URL, True)
+    # 2) Repli sans schéma si échec
+    if response is None:
+        response, last_err = _attempt(GEMINI_MODEL, GEMINI_API_URL, False)
 
     if response is None:
         return [], last_err or "Erreur Gemini inconnue"
