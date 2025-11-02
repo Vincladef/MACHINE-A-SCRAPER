@@ -13,7 +13,7 @@ jobs:
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
       GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
       PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
-      PERPLEXITY_MODEL: "sonar-small-online"
+      PERPLEXITY_MODEL: "sonar-small-chat"
       INPUT_SHEET_NAME: "Feuille 1"
       SITES_SHEET_NAME: "Feuille 2"
       TARGET_SITE_COUNT: "100"
