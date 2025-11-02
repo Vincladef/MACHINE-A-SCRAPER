@@ -31,6 +31,7 @@ jobs:
       EXCLUDE_TERMS: "reddit upwork linkedin indeed pinterest"
       SKIP_SUBS: "blog.,docs.,help.,support.,news.,jobs."
       FALLBACK_TLDS: "com,net,org,io,co,eu"
+      DEBUG_GEMINI: "true"
     steps:
       - name: Checkout
         uses: actions/checkout@v4

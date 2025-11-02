@@ -27,6 +27,7 @@ from requests.exceptions import RequestException
 
 CSE_API_URL = "https://www.googleapis.com/customsearch/v1"
 EMAIL_REGEX = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+URL_TEXT_REGEX = re.compile(r"https?://[^\s\)\]\"'>]+")
 CREDS_FILENAME = "sheets_creds.json"
 MAX_RESULTS = int(os.getenv("MAX_RESULTS", "100"))
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "10"))
@@ -289,6 +290,20 @@ def extract_emails_from_html(html: str) -> Set[str]:
     return emails
 
 
+def collect_urls_from_obj(obj: object) -> List[str]:
+    """Extrait récursivement toutes les URLs trouvées dans un objet JSON."""
+    urls: List[str] = []
+    if isinstance(obj, dict):
+        for v in obj.values():
+            urls.extend(collect_urls_from_obj(v))
+    elif isinstance(obj, list):
+        for v in obj:
+            urls.extend(collect_urls_from_obj(v))
+    elif isinstance(obj, str):
+        urls.extend(URL_TEXT_REGEX.findall(obj))
+    return urls
+
+
 def fetch_sites_from_gemini(
     query: str,
     max_sites: int,
@@ -319,7 +334,8 @@ def fetch_sites_from_gemini(
         "- exclure réseaux sociaux (linkedin.com, facebook.com, x.com, instagram.com, youtube.com),\n"
         "- si la requête est en français, prioriser les domaines francophones/France,\n"
         "- pas de doublons d’hôte.\n"
-        f"Nombre maximum: {max_sites}."
+        f"Nombre maximum: {max_sites}.\n"
+        "Si tu ne peux pas produire le JSON demandé, renvoie simplement une liste d'URLs, une par ligne, sans autre texte."
         + avoid_clause
     )
 
@@ -425,29 +441,40 @@ def fetch_sites_from_gemini(
             parsed = json.loads(combined_text)
             entries: List[object] = []
             if isinstance(parsed, dict):
-                entries = (
-                    parsed.get("sites", [])
-                    or parsed.get("urls", [])
-                    or parsed.get("results", [])
-                )
+                # 1) chemins connus
+                for key in ("sites", "urls", "results", "items"):
+                    if parsed.get(key):
+                        entries = parsed[key]
+                        break
+                # 2) si entries vide, extraction récursive libre
+                if not entries:
+                    urls = collect_urls_from_obj(parsed)
             elif isinstance(parsed, list):
                 entries = parsed
 
-            for entry in entries:
-                if isinstance(entry, dict):
-                    url = entry.get("url") or entry.get("href") or entry.get("lien") or entry.get("link")
-                else:
-                    url = entry
-                if not url:
-                    continue
-                url = str(url).strip()
-                if not url.lower().startswith("http"):
-                    continue
-                urls.append(url)
+            # 3) si entries remplie, normalise en URLs
+            if entries:
+                for entry in entries:
+                    if isinstance(entry, dict):
+                        url = entry.get("url") or entry.get("href") or entry.get("link") or entry.get("lien")
+                    else:
+                        url = entry
+                    if not url:
+                        continue
+                    url = str(url).strip()
+                    if url.lower().startswith("http"):
+                        urls.append(url)
+            # 4) si toujours rien alors que le JSON était valide, fallback regex sur le texte
+            if not urls:
+                urls = [
+                    match.strip().rstrip(".,);]")
+                    for match in URL_TEXT_REGEX.findall(combined_text)
+                ]
         except json.JSONDecodeError:
+            # JSON invalide: extraction directe via regex
             urls = [
                 match.strip().rstrip(".,);]")
-                for match in re.findall(r"https?://[^\s\)\]\"'>]+", combined_text)
+                for match in URL_TEXT_REGEX.findall(combined_text)
             ]
 
     unique_urls = dedupe_preserve_order(urls)[:max_sites]
