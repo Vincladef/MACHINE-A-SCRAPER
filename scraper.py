@@ -75,7 +75,7 @@ GEMINI_API_URL = os.getenv(
     "GEMINI_API_URL",
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
 )
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "30"))
 # Compat: si GEMINI_MAX_SITES non défini, on réutilise PERPLEXITY_MAX_SITES s'il existe
 GEMINI_MAX_SITES = int(os.getenv("GEMINI_MAX_SITES", os.getenv("PERPLEXITY_MAX_SITES", "40")))
