@@ -21,6 +21,7 @@ jobs:
       PERPLEXITY_RETRIES: "4"
       REQUEST_DELAY: "1.0"
       HTTP_TIMEOUT: "10"
+      USE_CSE_FALLBACK: "false"
       CSE_LR: "lang_fr"
       CSE_GL: "fr"
       CSE_CR: "countryFR"

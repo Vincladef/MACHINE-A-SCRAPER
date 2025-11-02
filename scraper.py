@@ -45,6 +45,7 @@ INPUT_SHEET_NAME = os.getenv("INPUT_SHEET_NAME", "Feuille 1")
 SITES_SHEET_NAME = os.getenv("SITES_SHEET_NAME", "Feuille 2")
 EMAILS_SHEET_NAME = os.getenv("EMAILS_SHEET_NAME", "Feuille 3")
 TARGET_SITE_COUNT = int(os.getenv("TARGET_SITE_COUNT", "100"))
+USE_CSE_FALLBACK = os.getenv("USE_CSE_FALLBACK", "false").lower() in ("1", "true", "yes")
 EXTRA_PATHS = [
     "/contact",
     "/contact-us",
@@ -70,7 +71,7 @@ BLOCKED_DOMAINS = {
 EXTRA_QUERY = os.getenv("EXTRA_QUERY", "").strip()
 EXCLUDE_TERMS = [term for term in os.getenv("EXCLUDE_TERMS", "").split() if term]
 PERPLEXITY_API_URL = os.getenv("PERPLEXITY_API_URL", "https://api.perplexity.ai/chat/completions")
-PERPLEXITY_MODEL = os.getenv("PERPLEXITY_MODEL", "sonar-large-online")
+PERPLEXITY_MODEL = os.getenv("PERPLEXITY_MODEL", "sonar-large-chat")
 PERPLEXITY_TIMEOUT = int(os.getenv("PERPLEXITY_TIMEOUT", "30"))
 PERPLEXITY_MAX_SITES = int(os.getenv("PERPLEXITY_MAX_SITES", "40"))
 PERPLEXITY_RETRIES = int(os.getenv("PERPLEXITY_RETRIES", "3"))
@@ -437,7 +438,7 @@ def generate_candidate_links(
         if perplexity_errors:
             errors.extend(perplexity_errors)
 
-    if not links:
+    if not links and USE_CSE_FALLBACK:
         cse_urls, cse_error = fetch_results_paginated(cleaned, api_key, cx_id, max_results)
         if cse_urls:
             for url in cse_urls:
