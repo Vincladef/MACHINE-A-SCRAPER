@@ -15,7 +15,6 @@ jobs:
       CSE_CX_ID: ${{ secrets.CSE_CX_ID }}
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
       GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-      PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
       INPUT_SHEET_NAME: "Feuille 1"
       SITES_SHEET_NAME: "Feuille 2"
       EMAILS_SHEET_NAME: "Feuille 3"
@@ -31,8 +30,6 @@ jobs:
       EXTRA_QUERY: "site officiel contact email"
       EXCLUDE_TERMS: "reddit upwork linkedin indeed pinterest"
       SKIP_SUBS: "blog.,docs.,help.,support.,news.,jobs."
-      PERPLEXITY_MAX_SITES: "40"
-      PERPLEXITY_RETRIES: "4"
       TARGET_EMAIL_COUNT: "100"
       MAX_ITERATIONS: "12"
       FALLBACK_TLDS: "com,net,org,io,co,eu"

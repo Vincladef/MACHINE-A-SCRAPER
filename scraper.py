@@ -70,15 +70,20 @@ BLOCKED_DOMAINS = {
 }
 EXTRA_QUERY = os.getenv("EXTRA_QUERY", "").strip()
 EXCLUDE_TERMS = [term for term in os.getenv("EXCLUDE_TERMS", "").split() if term]
-PERPLEXITY_API_URL = os.getenv("PERPLEXITY_API_URL", "https://api.perplexity.ai/chat/completions")
-PERPLEXITY_MODEL = os.getenv("PERPLEXITY_MODEL", "llama-3.1-sonar-small-128k-chat")
-PERPLEXITY_TIMEOUT = int(os.getenv("PERPLEXITY_TIMEOUT", "30"))
-PERPLEXITY_MAX_SITES = int(os.getenv("PERPLEXITY_MAX_SITES", "40"))
-PERPLEXITY_RETRIES = int(os.getenv("PERPLEXITY_RETRIES", "3"))
+# Gemini configuration (remplace Perplexity)
+GEMINI_API_URL = os.getenv(
+    "GEMINI_API_URL",
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+)
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
+GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "30"))
+# Compat: si GEMINI_MAX_SITES non défini, on réutilise PERPLEXITY_MAX_SITES s'il existe
+GEMINI_MAX_SITES = int(os.getenv("GEMINI_MAX_SITES", os.getenv("PERPLEXITY_MAX_SITES", "40")))
+GEMINI_RETRIES = int(os.getenv("GEMINI_RETRIES", os.getenv("PERPLEXITY_RETRIES", "3")))
 FALLBACK_TLDS = [t.strip().lower() for t in os.getenv("FALLBACK_TLDS", "com,net,org,io,co,eu").split(",") if t]
 
 SOURCE_LABELS = {
-    "perplexity": "Perplexity",
+    "gemini": "Gemini",
     "cse": "Google CSE",
     "input": "URL fournie",
 }
@@ -283,14 +288,14 @@ def extract_emails_from_html(html: str) -> Set[str]:
     return emails
 
 
-def fetch_sites_from_perplexity(
+def fetch_sites_from_gemini(
     query: str,
     max_sites: int,
     exclude: Set[str] | None = None,
 ) -> Tuple[List[str], str]:
-    api_key = os.getenv("PERPLEXITY_API_KEY")
+    api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        return [], "PERPLEXITY_API_KEY manquante"
+        return [], "GEMINI_API_KEY manquante"
 
     exclude = exclude or set()
     avoid_clause = (
@@ -299,68 +304,72 @@ def fetch_sites_from_perplexity(
         else ""
     )
 
-    payload = {
-        "model": PERPLEXITY_MODEL,
-        "temperature": 0,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Tu aides à identifier des sites web pertinents. "
-                    "Réponds STRICTEMENT en JSON selon ce schéma: "
-                    "{\"sites\":[{\"url\":\"https://...\",\"notes\":\"...\"}, ...]}."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Fournis jusqu'à {max_sites} sites web actifs et pertinents en France pour: '{query}'. "
-                    "Priorise les domaines francophones/ou français. Pas de doublons." + avoid_clause
-                ),
-            },
-        ],
-        "max_output_tokens": 500,
-    }
+    # Prompt unique (Messages API non utilisée ici), retour strict JSON
+    user_text = (
+        "Tu aides à identifier des sites web pertinents. "
+        "Réponds STRICTEMENT en JSON selon ce schéma: "
+        "{\"sites\":[{\"url\":\"https://...\",\"notes\":\"...\"}]}\n"
+        f"Fournis jusqu'à {max_sites} sites web actifs et pertinents en France pour: '{query}'. "
+        "Priorise les domaines francophones/ou français. Pas de doublons." + avoid_clause
+    )
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
+    endpoint = GEMINI_API_URL.format(model=GEMINI_MODEL)
+    params = {"key": api_key}
+    payload = {
+        "contents": [
+            {
+                "parts": [{"text": user_text}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 800,
+        },
     }
 
     try:
-        response = requests.post(
-            PERPLEXITY_API_URL,
-            json=payload,
-            headers=headers,
-            timeout=PERPLEXITY_TIMEOUT,
-        )
+        response = requests.post(endpoint, params=params, json=payload, timeout=GEMINI_TIMEOUT)
         if response.status_code >= 400:
             try:
                 err_json = response.json()
-                err_msg = err_json.get("error", {}).get("message")
+                err_msg = (
+                    err_json.get("error", {}).get("message") or
+                    err_json.get("candidates", [{}])[0].get("finishReason")
+                )
             except Exception:
                 err_msg = None
             detail = err_msg or response.text
-            return [], f"Erreur Perplexity {response.status_code}: {detail}"
+            return [], f"Erreur Gemini {response.status_code}: {detail}"
         response.raise_for_status()
     except RequestException as exc:
-        return [], f"Erreur Perplexity: {exc}"
+        return [], f"Erreur Gemini: {exc}"
 
     try:
         data = response.json()
     except ValueError as exc:
-        return [], f"Réponse Perplexity invalide: {exc}"
+        return [], f"Réponse Gemini invalide: {exc}"
 
-    choices = data.get("choices", []) or []
-    if not choices:
-        return [], "Réponse Perplexity vide"
+    candidates = data.get("candidates", []) or []
+    if not candidates:
+        return [], "Réponse Gemini vide"
 
-    content = choices[0].get("message", {}).get("content", "")
+    # Texte renvoyé dans candidates[0].content.parts[*].text
+    text_parts = []
+    try:
+        content = candidates[0].get("content", {})
+        parts = content.get("parts", []) or []
+        for p in parts:
+            t = p.get("text")
+            if t:
+                text_parts.append(t)
+    except Exception:
+        pass
+
+    combined_text = "\n".join(text_parts).strip()
     urls: List[str] = []
-
-    if content:
+    if combined_text:
         try:
-            parsed = json.loads(content)
+            parsed = json.loads(combined_text)
             entries = []
             if isinstance(parsed, dict):
                 entries = parsed.get("sites", []) or parsed.get("urls", [])
@@ -381,12 +390,12 @@ def fetch_sites_from_perplexity(
         except json.JSONDecodeError:
             urls = [
                 match.strip().rstrip(".,);]")
-                for match in re.findall(r"https?://[^\s\]\)\"'>]+", content)
+                for match in re.findall(r"https?://[^\s\]\)\"'>]+", combined_text)
             ]
 
     unique_urls = dedupe_preserve_order(urls)[:max_sites]
     if not unique_urls:
-        return [], "Aucun site exploitable via Perplexity"
+        return [], "Aucun site exploitable via Gemini"
 
     return unique_urls, ""
 
@@ -397,7 +406,7 @@ def generate_candidate_links(
     cx_id: str,
     max_results: int,
     exclude: Set[str] | None = None,
-    use_perplexity: bool = True,
+    use_gemini: bool = True,
 ) -> Tuple[List[Tuple[str, str]], str]:
     cleaned = query.strip()
     if not cleaned:
@@ -410,18 +419,18 @@ def generate_candidate_links(
         return [(cleaned, "input")], ""
 
     already_seen = set(exclude or set())
-    perplexity_errors: List[str] = []
+    gemini_errors: List[str] = []
 
-    if use_perplexity:
-        for attempt in range(PERPLEXITY_RETRIES):
-            urls, err = fetch_sites_from_perplexity(
+    if use_gemini:
+        for attempt in range(GEMINI_RETRIES):
+            urls, err = fetch_sites_from_gemini(
                 cleaned,
-                PERPLEXITY_MAX_SITES,
+                GEMINI_MAX_SITES,
                 already_seen,
             )
             if not urls:
                 if err:
-                    perplexity_errors.append(f"Essai {attempt + 1}: {err}")
+                    gemini_errors.append(f"Essai {attempt + 1}: {err}")
                 continue
 
             new_found = False
@@ -429,14 +438,14 @@ def generate_candidate_links(
                 if url in already_seen:
                     continue
                 already_seen.add(url)
-                links.append((url, "perplexity"))
+                links.append((url, "gemini"))
                 new_found = True
 
             if not new_found:
                 break
 
-        if perplexity_errors:
-            errors.extend(perplexity_errors)
+        if gemini_errors:
+            errors.extend(gemini_errors)
 
     if not links and USE_CSE_FALLBACK:
         cse_urls, cse_error = fetch_results_paginated(cleaned, api_key, cx_id, max_results)
@@ -474,7 +483,7 @@ def collect_sites_mode(
     run_timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     sites: Dict[str, Dict[str, Set[str]]] = {}
     processed_links: Set[str] = set()
-    perplexity_available = bool(os.getenv("PERPLEXITY_API_KEY"))
+    gemini_available = bool(os.getenv("GEMINI_API_KEY"))
 
     base_allowed_tlds = set(ALLOW_TLDS)
     fallback_sequence = [t for t in FALLBACK_TLDS if t and t not in base_allowed_tlds]
@@ -500,7 +509,7 @@ def collect_sites_mode(
                 cx_id,
                 MAX_RESULTS,
                 processed_links,
-                use_perplexity=perplexity_available,
+                use_gemini=gemini_available,
             )
             if source_error:
                 print(f"Info sites - {query}: {source_error}")
