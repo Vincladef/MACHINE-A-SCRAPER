@@ -314,10 +314,10 @@ def fetch_sites_from_gemini(
         + avoid_clause
     )
 
-    def _attempt(model_name: str) -> Tuple[Response | None, str]:
-        endpoint = GEMINI_API_URL.format(model=model_name)
+    def _attempt(model_name: str, endpoint_format: str, use_schema: bool) -> Tuple[Response | None, str]:
+        endpoint = endpoint_format.format(model=model_name)
         params = {"key": api_key}
-        payload = {
+        payload: Dict[str, object] = {
             "contents": [
                 {
                     "parts": [{"text": user_text}],
@@ -329,6 +329,23 @@ def fetch_sites_from_gemini(
                 "response_mime_type": "application/json",
             },
         }
+        if use_schema:
+            # Ajoute un schéma JSON simple pour forcer une liste d'objets {url}
+            payload["generationConfig"]["response_schema"] = {  # type: ignore[index]
+                "type": "object",
+                "properties": {
+                    "sites": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"url": {"type": "string"}},
+                            "required": ["url"],
+                        },
+                    },
+                    "urls": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["sites"],
+            }
         try:
             resp = requests.post(endpoint, params=params, json=payload, timeout=GEMINI_TIMEOUT)
             if resp.status_code >= 400:
@@ -356,23 +373,17 @@ def fetch_sites_from_gemini(
     else:
         model_candidates.append(f"{GEMINI_MODEL}-001")
 
-    # Essaye v1 puis v1beta
-    endpoint_formats = [
-        "https://generativelanguage.googleapis.com/v1/models/{model}:generateContent",
-        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+    # Essaye v1 puis v1beta (v1beta autorise le schema strict)
+    endpoint_formats: List[Tuple[str, bool]] = [
+        ("https://generativelanguage.googleapis.com/v1/models/{model}:generateContent", False),
+        ("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent", True),
     ]
 
     response: Response | None = None
     last_err = ""
     for m in model_candidates:
-        for fmt in endpoint_formats:
-            # Override temporaire de l'endpoint format pour l'essai
-            original = GEMINI_API_URL
-            try:
-                globals()["GEMINI_API_URL"] = fmt
-                response, last_err = _attempt(m)
-            finally:
-                globals()["GEMINI_API_URL"] = original
+        for fmt, use_schema in endpoint_formats:
+            response, last_err = _attempt(m, fmt, use_schema)
             if response is not None:
                 break
         if response is not None:
@@ -407,15 +418,19 @@ def fetch_sites_from_gemini(
     if combined_text:
         try:
             parsed = json.loads(combined_text)
-            entries = []
+            entries: List[object] = []
             if isinstance(parsed, dict):
-                entries = parsed.get("sites", []) or parsed.get("urls", [])
+                entries = (
+                    parsed.get("sites", [])
+                    or parsed.get("urls", [])
+                    or parsed.get("results", [])
+                )
             elif isinstance(parsed, list):
                 entries = parsed
 
             for entry in entries:
                 if isinstance(entry, dict):
-                    url = entry.get("url") or entry.get("href") or entry.get("lien")
+                    url = entry.get("url") or entry.get("href") or entry.get("lien") or entry.get("link")
                 else:
                     url = entry
                 if not url:
@@ -427,7 +442,7 @@ def fetch_sites_from_gemini(
         except json.JSONDecodeError:
             urls = [
                 match.strip().rstrip(".,);]")
-                for match in re.findall(r"https?://[^\s\]\)\"'>]+", combined_text)
+                for match in re.findall(r"https?://[^\s\)\]\"'>]+", combined_text)
             ]
 
     unique_urls = dedupe_preserve_order(urls)[:max_sites]
