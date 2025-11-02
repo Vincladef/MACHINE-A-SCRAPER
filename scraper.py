@@ -81,6 +81,7 @@ GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "30"))
 GEMINI_MAX_SITES = int(os.getenv("GEMINI_MAX_SITES", os.getenv("PERPLEXITY_MAX_SITES", "40")))
 GEMINI_RETRIES = int(os.getenv("GEMINI_RETRIES", os.getenv("PERPLEXITY_RETRIES", "3")))
 FALLBACK_TLDS = [t.strip().lower() for t in os.getenv("FALLBACK_TLDS", "com,net,org,io,co,eu").split(",") if t]
+DEBUG_GEMINI = os.getenv("DEBUG_GEMINI", "false").lower() in ("1", "true", "yes")
 
 SOURCE_LABELS = {
     "gemini": "Gemini",
@@ -335,6 +336,10 @@ def fetch_sites_from_gemini(
                 "maxOutputTokens": 1024,
                 "response_mime_type": "application/json",
             },
+            # Active la recherche web pour ancrage sur des sources réelles
+            "tools": [
+                {"google_search_retrieval": {}}
+            ],
         }
         if use_schema:
             # Ajoute un schéma JSON simple pour forcer une liste d'objets {url}
@@ -421,6 +426,12 @@ def fetch_sites_from_gemini(
         pass
 
     combined_text = "\n".join(text_parts).strip()
+    # Nettoyage d'éventuels blocs Markdown ```json ... ```
+    if combined_text.startswith("```"):
+        stripped = combined_text.strip().strip("`")
+        if stripped.lower().startswith("json"):
+            stripped = stripped[4:].lstrip()
+        combined_text = stripped
     urls: List[str] = []
     if combined_text:
         try:
@@ -454,6 +465,8 @@ def fetch_sites_from_gemini(
 
     unique_urls = dedupe_preserve_order(urls)[:max_sites]
     if not unique_urls:
+        if DEBUG_GEMINI and combined_text:
+            print(f"[Gemini DEBUG] sortie non-parsée (tronc.): {combined_text[:800]}")
         return [], "Aucun site exploitable via Gemini"
 
     return unique_urls, ""
@@ -587,6 +600,10 @@ def collect_sites_mode(
                 if SKIP_SUBS and any(host.startswith(prefix) for prefix in SKIP_SUBS):
                     continue
                 if any(host.endswith(d) for d in BLOCKED_DOMAINS):
+                    continue
+
+                # Vérifie que le site répond réellement avec une page HTML
+                if not is_reachable_html(link):
                     continue
 
                 record = sites.setdefault(link, {"queries": set(), "sources": set()})
@@ -782,6 +799,33 @@ def fetch_page(url: str) -> Tuple[Response | None, str]:
         return response, ""
     except RequestException as exc:
         return None, f"Erreur HTTP: {exc}"
+
+
+def is_reachable_html(url: str) -> bool:
+    """Teste rapidement si un site répond avec une page HTML.
+
+    Utilise HEAD quand c'est possible, puis GET streaming en repli.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; SiteVerifier/1.0; +https://example.com)",
+    }
+    try:
+        r = requests.head(url, headers=headers, timeout=HTTP_TIMEOUT, allow_redirects=True)
+        if 200 <= r.status_code < 400:
+            ctype = (r.headers.get("content-type") or "").lower()
+            if not ctype or "text/html" in ctype or "text/" in ctype:
+                return True
+    except RequestException:
+        pass
+    try:
+        r = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT, stream=True)
+        if 200 <= r.status_code < 400:
+            ctype = (r.headers.get("content-type") or "").lower()
+            if not ctype or "text/html" in ctype or "text/" in ctype:
+                return True
+    except RequestException:
+        return False
+    return False
 
 def main() -> int:
     try:
