@@ -333,6 +333,14 @@ def fetch_sites_from_perplexity(
             headers=headers,
             timeout=PERPLEXITY_TIMEOUT,
         )
+        if response.status_code >= 400:
+            try:
+                err_json = response.json()
+                err_msg = err_json.get("error", {}).get("message")
+            except Exception:
+                err_msg = None
+            detail = err_msg or response.text
+            return [], f"Erreur Perplexity {response.status_code}: {detail}"
         response.raise_for_status()
     except RequestException as exc:
         return [], f"Erreur Perplexity: {exc}"
