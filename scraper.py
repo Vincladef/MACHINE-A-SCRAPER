@@ -304,13 +304,14 @@ def fetch_sites_from_gemini(
         else ""
     )
 
-    # Prompt unique (Messages API non utilisée ici), retour strict JSON
+    # Prompt unique, sortie JSON stricte
     user_text = (
-        "Tu aides à identifier des sites web pertinents. "
-        "Réponds STRICTEMENT en JSON selon ce schéma: "
-        "{\"sites\":[{\"url\":\"https://...\",\"notes\":\"...\"}]}\n"
-        f"Fournis jusqu'à {max_sites} sites web actifs et pertinents en France pour: '{query}'. "
-        "Priorise les domaines francophones/ou français. Pas de doublons." + avoid_clause
+        "Pour la requête suivante, retourne UNIQUEMENT un JSON valide. "
+        "Schéma exact: {\"sites\":[{\"url\":\"https://exemple.com\"}]} . "
+        "Règles: uniquement des URLs http(s) de sites officiels (pas de réseaux sociaux, pas d'agrégateurs), "
+        "d'abord francophones/France, pas de doublons. "
+        f"Cible: '{query}'. Nombre maximum: {max_sites}. "
+        + avoid_clause
     )
 
     def _attempt(model_name: str) -> Tuple[Response | None, str]:
@@ -324,7 +325,8 @@ def fetch_sites_from_gemini(
             ],
             "generationConfig": {
                 "temperature": 0.2,
-                "maxOutputTokens": 800,
+                "maxOutputTokens": 1024,
+                "response_mime_type": "application/json",
             },
         }
         try:
