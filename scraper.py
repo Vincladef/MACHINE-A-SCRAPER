@@ -119,13 +119,14 @@ def is_probable_email(addr: str) -> bool:
 
 
 def build_query(base: str) -> str:
-    """Construit une requête optimisée pour CSE, privilégiant sites officiels/contact."""
-    # Force la recherche exacte sur la cible principale
-    main_target = f'"{base}"'  # Entre guillemets pour recherche exacte
-    components = [main_target]
+    """Construit une requête optimisée pour CSE, privilégiant sites officiels/contact.
     
-    # Ajoute des termes pour privilégier sites professionnels (sans trop diluer)
-    official_terms = ["site officiel", "contact"]
+    Équilibre: requête assez large pour avoir des résultats, filtrage strict post-résultats.
+    """
+    components = [base]  # Pas de guillemets: recherche plus large
+    
+    # Ajoute des termes pour privilégier sites professionnels
+    official_terms = ["contact", "site officiel"]
     components.extend(official_terms)
     
     if EXTRA_QUERY:
@@ -133,32 +134,20 @@ def build_query(base: str) -> str:
     
     query = " ".join(components).strip()
     
-    # Exclut explicitement les domaines d'annuaires/formations
+    # Exclusion minimale dans la requête (juste les gros annuaires)
+    # Le reste sera filtré par scoring post-résultats
     exclude_base = [
         "-site:studyrama.com",
         "-site:letudiant.fr",
         "-site:onisep.fr",
-        "-site:diplomeo.com",
         "-site:wikipedia.org",
         "-site:fr.wikipedia.org",
     ]
     query += " " + " ".join(exclude_base)
     
-    # Exclut les agrégateurs/médias
-    if EXCLUDE_TERMS:
-        query += " " + " ".join(f"-{term}" for term in EXCLUDE_TERMS)
-    
-    # Exclut les types de pages non pertinentes
-    exclude_pages = [
-        "-inurl:blog",
-        "-inurl:article",
-        "-inurl:news",
-        "-inurl:wiki",
-        "-inurl:formation",
-        "-inurl:ecole",
-        "-inurl:etudiant",
-    ]
-    query += " " + " ".join(exclude_pages)
+    # Exclusion des réseaux sociaux seulement (les autres sont gérés par scoring)
+    social_exclude = ["-linkedin", "-facebook", "-instagram", "-twitter", "-x.com"]
+    query += " " + " ".join(social_exclude)
     
     return query
 
@@ -245,6 +234,7 @@ def fetch_results_paginated(
     api_key: str,
     cx_id: str,
     max_results: int = MAX_RESULTS,
+    original_base: str | None = None,
 ) -> Tuple[List[str], str]:
     """Retourne jusqu'à `max_results` URLs via l'API Google Custom Search (pagination)."""
 
@@ -259,10 +249,14 @@ def fetch_results_paginated(
     while len(links) < target and start <= 100:
         remaining = target - len(links)
         batch_size = min(10, remaining)
+        # `query` est déjà la requête construite par build_query depuis generate_candidate_links
+        # Si on reçoit juste la base, on construit la requête, sinon on l'utilise telle quelle
+        final_query = query if "-site:" in query or "-inurl:" in query or "-linkedin" in query else build_query(query)
+        
         params = {
             "key": api_key,
             "cx": cx_id,
-            "q": build_query(query),
+            "q": final_query,
             "num": batch_size,
             "start": start,
         }
@@ -298,11 +292,12 @@ def fetch_results_paginated(
 
         # Filtre les résultats avec scoring de pertinence
         scored_items = []
-        # Extraire les mots-clés significatifs de la requête originale
+        # Extraire les mots-clés significatifs de la base originale (sans exclusions)
+        base_for_scoring = original_base or query
         query_words = set(
-            word.lower()
-            for word in query.split()
-            if len(word) > 3 and not word.startswith("-")
+            word.lower().strip('"').strip("'")
+            for word in base_for_scoring.split()
+            if len(word) > 2 and not word.startswith("-") and word not in ["site", "officiel", "contact"]
         )
         
         for item in items:
@@ -315,17 +310,20 @@ def fetch_results_paginated(
             score = 0
             
             # BONUS: Correspondance avec la requête originale (crucial)
-            query_match_count = sum(
-                1 for word in query_words if len(word) > 3 and word in combined_text
-            )
+            # Exige une correspondance forte pour éviter les faux positifs
             if query_words:
+                query_match_count = sum(
+                    1 for word in query_words if word in combined_text
+                )
                 match_ratio = query_match_count / len(query_words)
-                if match_ratio >= 0.6:  # Au moins 60% des mots doivent matcher
-                    score += 10
+                if match_ratio >= 0.8:  # Au moins 80% des mots doivent matcher (plus strict)
+                    score += 15  # Bonus plus important
+                elif match_ratio >= 0.6:  # 60-80% match
+                    score += 8
                 elif match_ratio >= 0.4:  # 40-60% match
-                    score += 5
+                    score += 3
                 else:
-                    score -= 5  # Malus si peu de correspondance
+                    score -= 10  # Malus fort si peu de correspondance (< 40%)
             
             # BONUS: Contient mots-clés de contact professionnel
             contact_keywords = [
@@ -402,8 +400,9 @@ def fetch_results_paginated(
             if any(domain in link.lower() for domain in generic_domains):
                 score -= 10
             
-            # Ne garde que les résultats avec score > 0
-            if score > 0:
+            # Ne garde que les résultats avec score >= 3 (plus strict)
+            # Cela garantit au moins un bonus de correspondance partielle ou contact
+            if score >= 3:
                 scored_items.append((score, item))
         
         # Trie par score décroissant et garde les meilleurs
@@ -712,7 +711,14 @@ def generate_candidate_links(
             errors.extend(gemini_errors)
 
     # Utilise CSE directement (Gemini désactivé)
-    cse_urls, cse_error = fetch_results_paginated(cleaned, api_key, cx_id, max_results)
+    # Passe la base originale pour le scoring de pertinence
+    cse_urls, cse_error = fetch_results_paginated(
+        build_query(cleaned),  # Requête avec exclusions
+        api_key,
+        cx_id,
+        max_results,
+        original_base=cleaned,  # Base originale pour scoring
+    )
     if cse_urls:
         for url in cse_urls:
             if url in already_seen:
