@@ -75,7 +75,7 @@ GEMINI_API_URL = os.getenv(
     "GEMINI_API_URL",
     "https://generativelanguage.googleapis.com/v1/models/{model}:generateContent",
 )
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-001")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "30"))
 # Compat: si GEMINI_MAX_SITES non défini, on réutilise PERPLEXITY_MAX_SITES s'il existe
 GEMINI_MAX_SITES = int(os.getenv("GEMINI_MAX_SITES", os.getenv("PERPLEXITY_MAX_SITES", "40")))
@@ -346,17 +346,33 @@ def fetch_sites_from_gemini(
             return None, f"Erreur Gemini: {exc}"
 
     model_candidates = [GEMINI_MODEL]
-    if not GEMINI_MODEL.endswith("-latest"):
-        model_candidates.append(f"{GEMINI_MODEL}-latest")
-    if not GEMINI_MODEL.endswith("-001"):
-        base = GEMINI_MODEL.replace("-latest", "").rstrip("-")
-        if not base.endswith("-001"):
-            model_candidates.append(f"{base}-001")
+    # Ajoute la variante -001 si absente, sinon tente aussi la variante sans -001
+    if GEMINI_MODEL.endswith("-001"):
+        base = GEMINI_MODEL[:-4]
+        if base:
+            model_candidates.append(base)
+    else:
+        model_candidates.append(f"{GEMINI_MODEL}-001")
+
+    # Essaye v1 puis v1beta
+    endpoint_formats = [
+        "https://generativelanguage.googleapis.com/v1/models/{model}:generateContent",
+        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+    ]
 
     response: Response | None = None
     last_err = ""
     for m in model_candidates:
-        response, last_err = _attempt(m)
+        for fmt in endpoint_formats:
+            # Override temporaire de l'endpoint format pour l'essai
+            original = GEMINI_API_URL
+            try:
+                globals()["GEMINI_API_URL"] = fmt
+                response, last_err = _attempt(m)
+            finally:
+                globals()["GEMINI_API_URL"] = original
+            if response is not None:
+                break
         if response is not None:
             break
 
