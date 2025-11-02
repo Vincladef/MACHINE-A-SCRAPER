@@ -107,12 +107,22 @@ def is_probable_email(addr: str) -> bool:
 
 
 def build_query(base: str) -> str:
+    """Construit une requête optimisée pour CSE, privilégiant sites officiels/contact."""
     components = [base]
+    
+    # Ajoute des termes pour privilégier sites officiels/contact
+    official_terms = ["site officiel", "contact", "entreprise"]
+    components.extend(official_terms)
+    
     if EXTRA_QUERY:
         components.append(EXTRA_QUERY)
+    
     query = " ".join(components).strip()
+    
+    # Exclut explicitement les agrégateurs/médias
     if EXCLUDE_TERMS:
         query += " " + " ".join(f"-{term}" for term in EXCLUDE_TERMS)
+    
     return query
 
 
@@ -249,7 +259,30 @@ def fetch_results_paginated(
         if not items:
             break
 
-        batch_links = [item.get("link") for item in items if item.get("link")]
+        # Filtre les résultats pour privilégier les pages officielles
+        filtered_items = []
+        for item in items:
+            link = item.get("link", "")
+            title = (item.get("title") or "").lower()
+            snippet = (item.get("snippet") or "").lower()
+            
+            # Skip si c'est clairement un blog/article/média
+            skip_patterns = ["/blog/", "/article/", "/news/", "/tag/", "/category/", "magazine", "journal"]
+            if any(pattern in link.lower() or pattern in title for pattern in skip_patterns):
+                continue
+            
+            # Skip sous-domaines indésirables
+            if SKIP_SUBS and any(link.lower().startswith(f"https://{prefix}") for prefix in SKIP_SUBS):
+                continue
+            
+            filtered_items.append(item)
+
+        if not filtered_items:
+            # Pas de résultats filtrés, on continue quand même avec les non-filtrés
+            # pour ne pas perdre de résultats
+            filtered_items = items
+        
+        batch_links = [item.get("link") for item in filtered_items if item.get("link")]
         links.extend(batch_links)
 
         start += batch_size
@@ -533,16 +566,16 @@ def generate_candidate_links(
         if gemini_errors:
             errors.extend(gemini_errors)
 
-    if not links and USE_CSE_FALLBACK:
-        cse_urls, cse_error = fetch_results_paginated(cleaned, api_key, cx_id, max_results)
-        if cse_urls:
-            for url in cse_urls:
-                if url in already_seen:
-                    continue
-                already_seen.add(url)
-                links.append((url, "cse"))
-        elif cse_error:
-            errors.append(cse_error)
+    # Utilise CSE directement (Gemini désactivé)
+    cse_urls, cse_error = fetch_results_paginated(cleaned, api_key, cx_id, max_results)
+    if cse_urls:
+        for url in cse_urls:
+            if url in already_seen:
+                continue
+            already_seen.add(url)
+            links.append((url, "cse"))
+    elif cse_error:
+        errors.append(cse_error)
 
     deduped: List[Tuple[str, str]] = []
     seen_links: Set[str] = set()
@@ -569,7 +602,6 @@ def collect_sites_mode(
     run_timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     sites: Dict[str, Dict[str, Set[str]]] = {}
     processed_links: Set[str] = set()
-    gemini_available = bool(os.getenv("GEMINI_API_KEY"))
 
     base_allowed_tlds = set(ALLOW_TLDS)
     fallback_sequence = [t for t in FALLBACK_TLDS if t and t not in base_allowed_tlds]
@@ -595,7 +627,7 @@ def collect_sites_mode(
                 cx_id,
                 MAX_RESULTS,
                 processed_links,
-                use_gemini=gemini_available,
+                use_gemini=False,  # Force CSE uniquement
             )
             if source_error:
                 print(f"Info sites - {query}: {source_error}")

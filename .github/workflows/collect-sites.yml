@@ -12,26 +12,21 @@ jobs:
       CSE_CX_ID: ${{ secrets.CSE_CX_ID }}
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
       GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_MODEL: "gemini-2.5-flash"
       INPUT_SHEET_NAME: "Feuille 1"
       SITES_SHEET_NAME: "Feuille 2"
       TARGET_SITE_COUNT: "100"
       MAX_ITERATIONS: "12"
-      GEMINI_MAX_SITES: "5"
-      GEMINI_RETRIES: "4"
       REQUEST_DELAY: "1.0"
       HTTP_TIMEOUT: "10"
-      USE_CSE_FALLBACK: "false"
+      MAX_RESULTS: "100"
       CSE_LR: "lang_fr"
       CSE_GL: "fr"
       CSE_CR: "countryFR"
       ALLOW_TLDS: "fr"
-      EXTRA_QUERY: "site officiel contact email"
-      EXCLUDE_TERMS: "reddit upwork linkedin indeed pinterest"
+      EXTRA_QUERY: "site officiel contact"
+      EXCLUDE_TERMS: "reddit upwork linkedin indeed pinterest blog article magazine journal news"
       SKIP_SUBS: "blog.,docs.,help.,support.,news.,jobs."
       FALLBACK_TLDS: "com,net,org,io,co,eu"
-      DEBUG_GEMINI: "true"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
