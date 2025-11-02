@@ -13,7 +13,7 @@ jobs:
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
       GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_MODEL: "gemini-1.5-flash"
+      GEMINI_MODEL: "gemini-1.5-flash-001"
       INPUT_SHEET_NAME: "Feuille 1"
       SITES_SHEET_NAME: "Feuille 2"
       TARGET_SITE_COUNT: "100"

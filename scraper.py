@@ -73,9 +73,9 @@ EXCLUDE_TERMS = [term for term in os.getenv("EXCLUDE_TERMS", "").split() if term
 # Gemini configuration (remplace Perplexity)
 GEMINI_API_URL = os.getenv(
     "GEMINI_API_URL",
-    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+    "https://generativelanguage.googleapis.com/v1/models/{model}:generateContent",
 )
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-001")
 GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "30"))
 # Compat: si GEMINI_MAX_SITES non défini, on réutilise PERPLEXITY_MAX_SITES s'il existe
 GEMINI_MAX_SITES = int(os.getenv("GEMINI_MAX_SITES", os.getenv("PERPLEXITY_MAX_SITES", "40")))
@@ -313,36 +313,55 @@ def fetch_sites_from_gemini(
         "Priorise les domaines francophones/ou français. Pas de doublons." + avoid_clause
     )
 
-    endpoint = GEMINI_API_URL.format(model=GEMINI_MODEL)
-    params = {"key": api_key}
-    payload = {
-        "contents": [
-            {
-                "parts": [{"text": user_text}],
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.2,
-            "maxOutputTokens": 800,
-        },
-    }
+    def _attempt(model_name: str) -> Tuple[Response | None, str]:
+        endpoint = GEMINI_API_URL.format(model=model_name)
+        params = {"key": api_key}
+        payload = {
+            "contents": [
+                {
+                    "parts": [{"text": user_text}],
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": 800,
+            },
+        }
+        try:
+            resp = requests.post(endpoint, params=params, json=payload, timeout=GEMINI_TIMEOUT)
+            if resp.status_code >= 400:
+                try:
+                    err_json = resp.json()
+                    err_msg = (
+                        err_json.get("error", {}).get("message") or
+                        (err_json.get("candidates", [{}])[0].get("finishReason") if isinstance(err_json.get("candidates"), list) else None)
+                    )
+                except Exception:
+                    err_msg = None
+                detail = err_msg or resp.text
+                return None, f"Erreur Gemini {resp.status_code}: {detail}"
+            resp.raise_for_status()
+            return resp, ""
+        except RequestException as exc:
+            return None, f"Erreur Gemini: {exc}"
 
-    try:
-        response = requests.post(endpoint, params=params, json=payload, timeout=GEMINI_TIMEOUT)
-        if response.status_code >= 400:
-            try:
-                err_json = response.json()
-                err_msg = (
-                    err_json.get("error", {}).get("message") or
-                    err_json.get("candidates", [{}])[0].get("finishReason")
-                )
-            except Exception:
-                err_msg = None
-            detail = err_msg or response.text
-            return [], f"Erreur Gemini {response.status_code}: {detail}"
-        response.raise_for_status()
-    except RequestException as exc:
-        return [], f"Erreur Gemini: {exc}"
+    model_candidates = [GEMINI_MODEL]
+    if not GEMINI_MODEL.endswith("-latest"):
+        model_candidates.append(f"{GEMINI_MODEL}-latest")
+    if not GEMINI_MODEL.endswith("-001"):
+        base = GEMINI_MODEL.replace("-latest", "").rstrip("-")
+        if not base.endswith("-001"):
+            model_candidates.append(f"{base}-001")
+
+    response: Response | None = None
+    last_err = ""
+    for m in model_candidates:
+        response, last_err = _attempt(m)
+        if response is not None:
+            break
+
+    if response is None:
+        return [], last_err or "Erreur Gemini inconnue"
 
     try:
         data = response.json()
