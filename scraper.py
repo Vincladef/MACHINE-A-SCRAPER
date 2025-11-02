@@ -304,20 +304,20 @@ def fetch_sites_from_gemini(
         else ""
     )
 
-    # Prompt unique, sortie JSON stricte
+    # Prompt unique, sortie JSON stricte (générique, basé uniquement sur 'query')
     user_text = (
         "Retourne UNIQUEMENT un JSON valide au format: "
         "{\"sites\":[{\"url\":\"https://exemple.com\"}]}\n"
-        "Objectif: trouver des sites OFFICIELS de consultants indépendants ou très petites sociétés (≤10 pers) "
-        "spécialisés en psychologie de la vente / emailing.\n"
+        f"Objectif: trouver des sites pertinents pour la requête: '{query}'.\n"
         "Règles:\n"
-        "- uniquement des domaines racine (page d’accueil) ou pages contact/a-propos/mentions, pas d’articles,\n"
+        "- privilégier indépendants, petites structures (≤10 pers) ou sociétés sans HR/R&D;\n"
+        "- privilégier des domaines racine (page d’accueil) ou pages contact/a-propos/mentions; pas d’articles,\n"
         "- exclure médias/magazines/blogs/annuaires/forums/comparateurs,\n"
         "- exclure outils/SaaS (HubSpot, Brevo, ActiveCampaign, Mailchimp, GetResponse, Salesforce, etc.),\n"
         "- exclure réseaux sociaux (linkedin.com, facebook.com, x.com, instagram.com, youtube.com),\n"
-        "- prioriser domaines francophones/France,\n"
+        "- si la requête est en français, prioriser les domaines francophones/France,\n"
         "- pas de doublons d’hôte.\n"
-        f"Cible: '{query}'. Nombre maximum: {max_sites}."
+        f"Nombre maximum: {max_sites}."
         + avoid_clause
     )
 
