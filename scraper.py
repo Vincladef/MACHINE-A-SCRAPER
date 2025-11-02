@@ -68,6 +68,18 @@ BLOCKED_DOMAINS = {
     "instagram.com",
     "x.com",
     "youtube.com",
+    # Annuaires et formations (non pertinents pour contacts professionnels)
+    "studyrama.com",
+    "letudiant.fr",
+    "onisep.fr",
+    "diplomeo.com",
+    "regionsjob.com",
+    "pole-emploi.fr",
+    "cadreo.com",
+    "welcometothejungle.com",
+    "jobteaser.com",
+    "wikipedia.org",
+    "fr.wikipedia.org",
 }
 EXTRA_QUERY = os.getenv("EXTRA_QUERY", "").strip()
 EXCLUDE_TERMS = [term for term in os.getenv("EXCLUDE_TERMS", "").split() if term]
@@ -108,10 +120,12 @@ def is_probable_email(addr: str) -> bool:
 
 def build_query(base: str) -> str:
     """Construit une requête optimisée pour CSE, privilégiant sites officiels/contact."""
-    components = [base]
+    # Force la recherche exacte sur la cible principale
+    main_target = f'"{base}"'  # Entre guillemets pour recherche exacte
+    components = [main_target]
     
-    # Ajoute des termes pour privilégier sites officiels/contact
-    official_terms = ["site officiel", "contact", "entreprise"]
+    # Ajoute des termes pour privilégier sites professionnels (sans trop diluer)
+    official_terms = ["site officiel", "contact"]
     components.extend(official_terms)
     
     if EXTRA_QUERY:
@@ -119,9 +133,32 @@ def build_query(base: str) -> str:
     
     query = " ".join(components).strip()
     
-    # Exclut explicitement les agrégateurs/médias
+    # Exclut explicitement les domaines d'annuaires/formations
+    exclude_base = [
+        "-site:studyrama.com",
+        "-site:letudiant.fr",
+        "-site:onisep.fr",
+        "-site:diplomeo.com",
+        "-site:wikipedia.org",
+        "-site:fr.wikipedia.org",
+    ]
+    query += " " + " ".join(exclude_base)
+    
+    # Exclut les agrégateurs/médias
     if EXCLUDE_TERMS:
         query += " " + " ".join(f"-{term}" for term in EXCLUDE_TERMS)
+    
+    # Exclut les types de pages non pertinentes
+    exclude_pages = [
+        "-inurl:blog",
+        "-inurl:article",
+        "-inurl:news",
+        "-inurl:wiki",
+        "-inurl:formation",
+        "-inurl:ecole",
+        "-inurl:etudiant",
+    ]
+    query += " " + " ".join(exclude_pages)
     
     return query
 
@@ -259,28 +296,136 @@ def fetch_results_paginated(
         if not items:
             break
 
-        # Filtre les résultats pour privilégier les pages officielles
-        filtered_items = []
+        # Filtre les résultats avec scoring de pertinence
+        scored_items = []
+        # Extraire les mots-clés significatifs de la requête originale
+        query_words = set(
+            word.lower()
+            for word in query.split()
+            if len(word) > 3 and not word.startswith("-")
+        )
+        
         for item in items:
             link = item.get("link", "")
             title = (item.get("title") or "").lower()
             snippet = (item.get("snippet") or "").lower()
+            combined_text = f"{title} {snippet} {link}".lower()
             
-            # Skip si c'est clairement un blog/article/média
-            skip_patterns = ["/blog/", "/article/", "/news/", "/tag/", "/category/", "magazine", "journal"]
-            if any(pattern in link.lower() or pattern in title for pattern in skip_patterns):
-                continue
+            # Score de pertinence (plus haut = plus pertinent)
+            score = 0
             
-            # Skip sous-domaines indésirables
-            if SKIP_SUBS and any(link.lower().startswith(f"https://{prefix}") for prefix in SKIP_SUBS):
-                continue
+            # BONUS: Correspondance avec la requête originale (crucial)
+            query_match_count = sum(
+                1 for word in query_words if len(word) > 3 and word in combined_text
+            )
+            if query_words:
+                match_ratio = query_match_count / len(query_words)
+                if match_ratio >= 0.6:  # Au moins 60% des mots doivent matcher
+                    score += 10
+                elif match_ratio >= 0.4:  # 40-60% match
+                    score += 5
+                else:
+                    score -= 5  # Malus si peu de correspondance
             
-            filtered_items.append(item)
-
-        if not filtered_items:
-            # Pas de résultats filtrés, on continue quand même avec les non-filtrés
-            # pour ne pas perdre de résultats
-            filtered_items = items
+            # BONUS: Contient mots-clés de contact professionnel
+            contact_keywords = [
+                "contact",
+                "email",
+                "nous contacter",
+                "demande de devis",
+                "devis gratuit",
+                "appelez-nous",
+                "écrivez-nous",
+                "@",
+            ]
+            for keyword in contact_keywords:
+                if keyword in combined_text:
+                    score += 2
+            
+            # BONUS: URL contient /contact, /nous-contacter, etc.
+            contact_paths = ["/contact", "/nous-contacter", "/a-propos", "/qui-sommes-nous"]
+            if any(path in link.lower() for path in contact_paths):
+                score += 5
+            
+            # MALUS: Domaines d'annuaires/formations
+            formation_domains = [
+                "studyrama",
+                "letudiant",
+                "onisep",
+                "diplomeo",
+                "regionsjob",
+                "pole-emploi",
+                "cadreo",
+                "jobteaser",
+                "wikipedia",
+            ]
+            if any(domain in link.lower() for domain in formation_domains):
+                score -= 20  # Exclusion forte
+            
+            # MALUS: Pages de formations/écoles (sauf si contient consultant/indépendant)
+            formation_keywords = ["formation", "ecole", "etudiant", "etude", "diplome", "cursus", "programme"]
+            has_formation_kw = any(kw in combined_text for kw in formation_keywords)
+            has_professional_kw = "consultant" in combined_text or "indépendant" in combined_text or "freelance" in combined_text
+            if has_formation_kw and not has_professional_kw:
+                score -= 15  # Probablement une page d'école/formation
+            
+            # MALUS: Blog/article/média
+            skip_patterns = [
+                "/blog/",
+                "/article/",
+                "/news/",
+                "/tag/",
+                "/category/",
+                "magazine",
+                "journal",
+            ]
+            for pattern in skip_patterns:
+                if pattern in combined_text:
+                    score -= 10
+                    break
+            
+            # MALUS: Sous-domaines indésirables
+            if SKIP_SUBS and any(
+                link.lower().startswith(f"https://{prefix}") for prefix in SKIP_SUBS
+            ):
+                score -= 5
+            
+            # MALUS: Domaines génériques/agrégateurs
+            generic_domains = [
+                "linkedin.com",
+                "facebook.com",
+                "wikipedia.org",
+                "fr.wikipedia.org",
+                "viadeo.com",
+                "doctolib.fr",
+            ]
+            if any(domain in link.lower() for domain in generic_domains):
+                score -= 10
+            
+            # Ne garde que les résultats avec score > 0
+            if score > 0:
+                scored_items.append((score, item))
+        
+        # Trie par score décroissant et garde les meilleurs
+        scored_items.sort(key=lambda x: x[0], reverse=True)
+        filtered_items = [item for _, item in scored_items[:batch_size]]
+        
+        # Si pas assez de résultats, garde aussi ceux avec score neutre (non exclus)
+        if len(filtered_items) < batch_size:
+            for item in items:
+                link = item.get("link", "")
+                # Skip uniquement les domaines vraiment bloqués
+                if link and not any(
+                    domain in link.lower()
+                    for domain in ["studyrama", "letudiant", "wikipedia", "linkedin.com", "facebook.com"]
+                ):
+                    # Vérifie qu'on ne l'a pas déjà ajouté
+                    if not any(
+                        existing_item.get("link") == link for _, existing_item in scored_items
+                    ):
+                        filtered_items.append(item)
+                        if len(filtered_items) >= batch_size:
+                            break
         
         batch_links = [item.get("link") for item in filtered_items if item.get("link")]
         links.extend(batch_links)
@@ -640,15 +785,44 @@ def collect_sites_mode(
                     break
 
                 host = (urlparse(link).hostname or "").lower()
+                path = (urlparse(link).path or "").lower()
                 tld = host.split(".")[-1] if host else ""
+                
+                # TLD filtering
                 if allowed_tlds and tld and tld not in allowed_tlds:
                     continue
+                
+                # Sous-domaines indésirables
                 if SKIP_SUBS and any(host.startswith(prefix) for prefix in SKIP_SUBS):
                     continue
+                
+                # Domaines bloqués
                 if any(host.endswith(d) for d in BLOCKED_DOMAINS):
                     continue
-
-                # On s'appuie sur la recherche web demandée au modèle; pas de vérification HTTP locale
+                
+                # Exclusion stricte des domaines d'annuaires/formations
+                blocked_keywords = [
+                    "studyrama",
+                    "letudiant",
+                    "onisep",
+                    "diplomeo",
+                    "regionsjob",
+                    "pole-emploi",
+                    "cadreo",
+                    "jobteaser",
+                    "wikipedia",
+                    "annuaire",
+                    "directory",
+                ]
+                if any(kw in host for kw in blocked_keywords):
+                    continue
+                
+                # Exclusion des pages de formations/écoles
+                formation_paths = ["/formation", "/ecole", "/etudiant", "/etude", "/cursus"]
+                if any(kw in path for kw in formation_paths):
+                    # Skip sauf si c'est clairement un consultant/indépendant
+                    if "consultant" not in host and "consultant" not in path:
+                        continue
 
                 record = sites.setdefault(link, {"queries": set(), "sources": set()})
                 record["queries"].add(query)
