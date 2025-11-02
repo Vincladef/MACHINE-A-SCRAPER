@@ -311,6 +311,7 @@ def fetch_sites_from_gemini(
         "{\"sites\":[{\"url\":\"https://exemple.com\"}]}\n"
         f"Objectif: trouver des sites pertinents pour la requête: '{query}'.\n"
         "Règles:\n"
+        "- lance une RECHERCHE WEB (Google) pour identifier des sites ACTIFS et OFFICIELS,\n"
         "- privilégier indépendants, petites structures (≤10 pers) ou sociétés sans HR/R&D;\n"
         "- privilégier des domaines racine (page d’accueil) ou pages contact/a-propos/mentions; pas d’articles,\n"
         "- exclure médias/magazines/blogs/annuaires/forums/comparateurs,\n"
@@ -602,9 +603,7 @@ def collect_sites_mode(
                 if any(host.endswith(d) for d in BLOCKED_DOMAINS):
                     continue
 
-                # Vérifie que le site répond réellement avec une page HTML
-                if not is_reachable_html(link):
-                    continue
+                # On s'appuie sur la recherche web demandée au modèle; pas de vérification HTTP locale
 
                 record = sites.setdefault(link, {"queries": set(), "sources": set()})
                 record["queries"].add(query)
@@ -801,31 +800,7 @@ def fetch_page(url: str) -> Tuple[Response | None, str]:
         return None, f"Erreur HTTP: {exc}"
 
 
-def is_reachable_html(url: str) -> bool:
-    """Teste rapidement si un site répond avec une page HTML.
-
-    Utilise HEAD quand c'est possible, puis GET streaming en repli.
-    """
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; SiteVerifier/1.0; +https://example.com)",
-    }
-    try:
-        r = requests.head(url, headers=headers, timeout=HTTP_TIMEOUT, allow_redirects=True)
-        if 200 <= r.status_code < 400:
-            ctype = (r.headers.get("content-type") or "").lower()
-            if not ctype or "text/html" in ctype or "text/" in ctype:
-                return True
-    except RequestException:
-        pass
-    try:
-        r = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT, stream=True)
-        if 200 <= r.status_code < 400:
-            ctype = (r.headers.get("content-type") or "").lower()
-            if not ctype or "text/html" in ctype or "text/" in ctype:
-                return True
-    except RequestException:
-        return False
-    return False
+# Vérification HTTP locale supprimée: on se repose sur la recherche web demandée au modèle
 
 def main() -> int:
     try:
