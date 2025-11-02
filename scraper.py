@@ -335,12 +335,8 @@ def fetch_sites_from_gemini(
             "generationConfig": {
                 "temperature": 0.2,
                 "maxOutputTokens": 1024,
-                "response_mime_type": "application/json",
             },
-            # Active la recherche web pour ancrage sur des sources réelles
-            "tools": [
-                {"google_search_retrieval": {}}
-            ],
+            # Pas de response_mime_type ni tools: non supportés par cet endpoint
         }
         if use_schema:
             # Ajoute un schéma JSON simple pour forcer une liste d'objets {url}
