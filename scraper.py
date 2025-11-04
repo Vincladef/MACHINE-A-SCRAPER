@@ -26,6 +26,9 @@ from requests import Response
 from requests.exceptions import RequestException
 
 CSE_API_URL = "https://www.googleapis.com/customsearch/v1"
+PLACES_API_URL = "https://places.googleapis.com/v1/places:searchText"
+PLACES_API_KEY = os.getenv("PLACES_API_KEY")
+USE_PLACES_API = os.getenv("USE_PLACES_API", "false").lower() in ("1", "true", "yes")
 EMAIL_REGEX = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 URL_TEXT_REGEX = re.compile(r"https?://[^\s\)\]\"'>]+")
 CREDS_FILENAME = "sheets_creds.json"
@@ -99,6 +102,7 @@ DEBUG_GEMINI = os.getenv("DEBUG_GEMINI", "false").lower() in ("1", "true", "yes"
 SOURCE_LABELS = {
     "gemini": "Gemini",
     "cse": "Google CSE",
+    "Google Places": "Google Places",
     "input": "URL fournie",
 }
 
@@ -445,6 +449,67 @@ def fetch_results_paginated(
     return unique_links, ""
 
 
+def fetch_from_places_api(
+    query: str,
+    api_key: str,
+    max_results: int = 10,
+) -> Tuple[List[Tuple[str, str]], str]:
+    """Recherche des établissements via Google Places API (New).
+    
+    Retourne: [(url, source), ...], erreur
+    """
+    if not api_key:
+        return [], "PLACES_API_KEY manquante"
+    
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": "places.id,places.displayName,places.websiteUri,places.formattedAddress,places.nationalPhoneNumber,places.types"
+    }
+    
+    payload = {
+        "textQuery": query,
+        "maxResultCount": min(max_results, 20),  # Limite API Places
+        "languageCode": "fr",
+        "regionCode": "FR",
+    }
+    
+    try:
+        response = requests.post(
+            PLACES_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=HTTP_TIMEOUT
+        )
+        response.raise_for_status()
+        data = response.json()
+        
+        results = []
+        places = data.get("places", [])
+        
+        for place in places:
+            # Récupère le site web
+            website = place.get("websiteUri")
+            if website:
+                # Nettoie l'URL (enlève paramètres/fragments)
+                clean_url = website.split("?")[0].split("#")[0].rstrip("/")
+                if clean_url.startswith("http"):
+                    results.append((clean_url, "Google Places"))
+        
+        return results, ""
+        
+    except requests.HTTPError as e:
+        status = getattr(e.response, "status_code", "HTTP")
+        detail = str(e)
+        try:
+            detail = e.response.json().get("error", {}).get("message") or detail
+        except Exception:
+            pass
+        return [], f"Erreur Places API {status}: {detail}"
+    except RequestException as e:
+        return [], f"Erreur Places API: {e}"
+
+
 def extract_emails_from_html(html: str) -> Set[str]:
     """Retourne l'ensemble des emails probables trouvés dans le HTML."""
 
@@ -710,23 +775,36 @@ def generate_candidate_links(
         if gemini_errors:
             errors.extend(gemini_errors)
 
-    # Utilise CSE directement (Gemini désactivé)
-    # Passe la base originale pour le scoring de pertinence
+    # PRIORITÉ 1: Google Places API (Google Maps/My Business)
+    if USE_PLACES_API and PLACES_API_KEY:
+        places_urls, places_error = fetch_from_places_api(
+            cleaned,
+            PLACES_API_KEY,
+            max_results // 2,  # Répartit entre Places et CSE
+        )
+        if places_urls:
+            for url, origin in places_urls:
+                if url not in already_seen:
+                    already_seen.add(url)
+                    links.append((url, origin))
+        elif places_error:
+            errors.append(f"Places: {places_error}")
+
+    # PRIORITÉ 2: Google Custom Search (fallback ou complément)
     cse_urls, cse_error = fetch_results_paginated(
         build_query(cleaned),  # Requête avec exclusions
         api_key,
         cx_id,
-        max_results,
+        max_results - len(links),  # Ajuste selon Places
         original_base=cleaned,  # Base originale pour scoring
     )
     if cse_urls:
         for url in cse_urls:
-            if url in already_seen:
-                continue
-            already_seen.add(url)
-            links.append((url, "cse"))
+            if url not in already_seen:
+                already_seen.add(url)
+                links.append((url, "cse"))
     elif cse_error:
-        errors.append(cse_error)
+        errors.append(f"CSE: {cse_error}")
 
     deduped: List[Tuple[str, str]] = []
     seen_links: Set[str] = set()

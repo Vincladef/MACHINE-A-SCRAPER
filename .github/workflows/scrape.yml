@@ -13,6 +13,8 @@ jobs:
       SCRAPER_MODE: "scrape_emails"
       CSE_API_KEY: ${{ secrets.CSE_API_KEY }}
       CSE_CX_ID: ${{ secrets.CSE_CX_ID }}
+      PLACES_API_KEY: ${{ secrets.PLACES_API_KEY }}
+      USE_PLACES_API: "true"
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
       GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
       INPUT_SHEET_NAME: "Feuille 1"
